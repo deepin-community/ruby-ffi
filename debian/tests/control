@@ -1,0 +1,9 @@
+Tests: smoke
+
+Test-Command: gem2deb-test-runner --autopkgtest 2>&1
+Depends: build-essential,
+         gem2deb-test-runner,
+         ruby-all-dev,
+         ruby-rspec,
+         @
+Features: test-name=gem2deb-test-runner

@@ -1,0 +1,6 @@
+version=4
+opts=\
+repacksuffix=+dfsg,\
+repack,compression=xz,\
+dversionmangle=s/(\d)[\+]?(debian|dfsg|ds|deb|gh)\d*$/$1/ \
+  https://github.com/ffi/ffi/tags .*/v?([\d\.]+).tar.gz

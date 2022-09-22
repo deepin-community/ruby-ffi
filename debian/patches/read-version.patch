@@ -1,0 +1,14 @@
+Description: read correctly the version file from gemspec
+Author: Cédric Boutillier <boutil@debian.org>
+Last-Update: 2021-11-22
+Forwarded: no
+
+--- a/ffi.gemspec
++++ b/ffi.gemspec
+@@ -1,4 +1,5 @@
+-require File.expand_path("../lib/#{File.basename(__FILE__, '.gemspec')}/version", __FILE__)
++$: << "lib/"
++require 'ffi/version'
+ 
+ Gem::Specification.new do |s|
+   s.name = 'ffi'

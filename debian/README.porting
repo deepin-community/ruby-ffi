@@ -1,0 +1,13 @@
+Before building this package for new architectures, you have first to generate
+a configuration for that architecture, which is used at runtime to determine
+size of data types.
+
+To do that, just run:
+
+  $ debian/rules gen_arch_config
+ 
+This will create a new configuration directory in lib/ffi/platform/ for the new
+architecture, and a types.conf file inside it. Please submit that file to be
+included in the upstream sources.
+
+ -- Antonio Terceiro <terceiro@debian.org>  Wed, 08 Jan 2014 09:26:30 -0300

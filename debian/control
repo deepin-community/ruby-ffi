@@ -1,0 +1,33 @@
+Source: ruby-ffi
+Section: ruby
+Priority: optional
+Maintainer: Debian Ruby Team <pkg-ruby-extras-maintainers@lists.alioth.debian.org>
+Uploaders: Micah Anderson <micah@debian.org>,
+           Utkarsh Gupta <utkarsh@debian.org>
+Build-Depends: debhelper-compat (= 13),
+               gem2deb (>= 1),
+               libffi-dev,
+               rake,
+               ruby-rspec
+Standards-Version: 4.6.0
+Vcs-Git: https://salsa.debian.org/ruby-team/ruby-ffi.git
+Vcs-Browser: https://salsa.debian.org/ruby-team/ruby-ffi
+Homepage: https://github.com/ffi/ffi/wiki
+# NOT autopkgtest-pkg-ruby, on purpose
+Testsuite: autopkgtest
+XS-Ruby-Versions: all
+Rules-Requires-Root: no
+
+Package: ruby-ffi
+Architecture: any
+XB-Ruby-Versions: ${ruby:Versions}
+Depends: ${ruby:Depends},
+         ${misc:Depends},
+         ${shlibs:Depends}
+Multi-Arch: same
+Description: load dynamic libraries, bind functions from within ruby code
+ Ruby-FFI is a ruby extension for programmatically loading dynamic
+ libraries, binding functions within them, and calling those functions
+ from Ruby code. Moreover, a Ruby-FFI extension works without changes
+ on Ruby and JRuby. Discover why should you write your next extension
+ using Ruby-FFI at https://github.com/ffi/ffi/wiki/Why-use-FFI.

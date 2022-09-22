@@ -1,0 +1,21 @@
+#!/usr/bin/make -f
+
+ifeq (ia64, $(shell dpkg-architecture -qDEB_BUILD_ARCH))
+	export DH_RUBY_IGNORE_TESTS=all
+endif
+
+export GEM2DEB_TEST_RUNNER = --check-dependencies
+export DH_RUBY = --gem-install
+
+%:
+	dh $@ --buildsystem=ruby --with ruby
+
+override_dh_auto_clean:
+	dh_auto_clean
+	rm -rf build/
+	rm -f spec/ffi/fixtures/*.so
+	rm -f spec/ffi/fixtures/*.o
+
+gen_arch_config:
+	(cd ext/ffi_c && ruby extconf.rb && make && cp ffi_c.so ../../lib)
+	(cd gen && rake)
