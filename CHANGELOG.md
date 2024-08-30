@@ -1,3 +1,135 @@
+1.17.0 / 2024-06-02
+-------------------
+
+Fixed:
+* Add FFI::AbstractMemory#read_array_of_string . It was defined but not exposed to Ruby nor tested. #1070
+
+
+1.17.0.rc2 / 2024-04-22
+-------------------
+
+Fixed:
+* Add missing write barriers to StructLayout#initialize causing a segfault with GC.stress. #1079
+
+
+1.17.0.rc1 / 2024-04-08
+-------------------
+
+Fixed:
+* Fix type definitions on `aarch64-linux`. #1067, #1066
+* Use RB_TEST for `Pointer.autorelease=` . #1065
+  So that `false` and `nil` are treated as falsey and anything else as truthy.
+* Replace Fixnum by Integer. #1064
+  Fixnum is no longer present in the ruby language.
+* Update `FFI::NativeType` doc. #1061
+* Store FFI::Type::Mapped of FFI::StrPtrConverter in global instead of custom type map
+* Various documentation fixes. #1042
+* Update `FFI::Pointer#==` to return `false` if a pointer is compared to a non-pointer object, which is the expected behavior. #1083
+* Avoid warning about undefined wariable `@ffi_functions` #1085
+* Fix a very unlikely GC bug when using a callback block. # 1089
+
+Added:
+* Provide binary gems for many platforms. #990
+* Add Windows fat binary gem for Ruby-3.3
+* Add RBS type definitions for many user facing parts of the FFI API. #1042
+* Improve fallback search path logic. #1088
+  Respect LD_LIBRARY_PATH and DYLD_LIBRARY_PATH on Macos.
+* Update libffi to current git master branch.
+
+Removed:
+* Remove `enum CHAR_ARRAY` which is no longer used. #1063
+
+
+1.16.3 / 2023-10-04
+-------------------
+
+Fixed:
+* Fix gcc error when building on CentOS 7. #1052
+* Avoid trying to store new DataConverter type in frozen TypeDefs hash. #1057
+
+
+1.16.2 / 2023-09-25
+-------------------
+
+Fixed:
+* Handle null pointer crash after fork. #1051
+
+
+1.16.1 / 2023-09-24
+-------------------
+
+Fixed:
+* Fix compiling the builtin libffi. #1049
+
+
+1.16.0 / 2023-09-23
+-------------------
+
+Fixed:
+* Fix an issue with signed bitmasks when using flags on the most significant bit. #949
+* Fix FFI::Pointer#initialize using NUM2LL instead of NUM2ULL.
+* Fix FFI::Type#inspect to properly display the constant name. #1002
+* Use libffi closure allocations on hppa-Linux. #1017
+  Previously they would segfault.
+* Fix class name of Symbol#inspect.
+* Fix MSVC support of libtest. #1028
+* Fix attach_function of functions ending in ? or ! #971
+
+Added:
+* Convert all C-based classes to TypedData and use write barriers. #994, #995, #996, #997, #998, #999, #1000, #1001, #1003, #1004, #1005, #1006, #1007, #1008, #1009, #1010, #1011, #1012
+  This results in less pressure on the garbage collector, since the objects can be promoted to the old generation, which means they only get marked on major GC.
+* Implement `ObjectSpace.memsize_of()` of all C-based classes.
+* Make FFI Ractor compatible. #1023
+  Modules extended per `extend FFI::Library` need to be frozen in order to be used by non-main Ractors.
+  This can be done by calling `freeze` below of all C interface definitions.
+  * In a Ractor it's possible to:
+    * load DLLs and call its functions, access its global variables
+    * use builtin typedefs
+    * use and modify ractor local typedefs
+    * define callbacks
+    * receive async callbacks from non-ruby threads
+    * use frozen FFI::Library based modules with all attributes (enums, structs, typedefs, functions, callbacks)
+    * invoke frozen functions and callbacks defined in the main Ractor
+    * use FFI::Struct definitions from the main Ractor
+  * In a Ractor it's impossible to:
+    * create new FFI::Library based modules
+    * create new FFI::Struct definitions
+    * use custom global typedefs
+    * use non-frozen FFI::Library based modules
+* Allow type retrieval of attached functions+variables. #1023
+* Make FFI classes `GC.compact` friendly. #1021
+* Update libffi and disable custom trampoline when using libffi closure allocation. #1020
+  This is because libffi changed the way how closures are allocated to static trampolines.
+* Add types.conf for loongarch64-linux. #943
+* Add types.conf for sw_64-linux (Shen Wei 64-bit, based on Alpha).  #1018
+* Add support for aarch64-windows. #1035
+* Windows: Update LoadLibrary error message to include error code. #1026
+* Allow private release method for FFI::ManagedStruct and FFI::AutoPointer. #1029
+* Add support for passing ABI version to FFI.map_library_name. #963
+  This adds the new class FFI::LibraryPath .
+* Add support for ruby-3.2 to windows binary gem. #1047
+* Enable debug symbols for `rake compile` builds to ease debugging. #1048
+
+Removed:
+* Remove allocator of AbstractMemory. #1013
+  This disables AbstractMemory.new, which has no practical use.
+* Remove unused FFI::SizeTypes. #1022
+
+
+1.15.5 / 2022-01-10
+-------------------
+
+Fixed:
+* Fix long double argument or return values on 32bit i686. #849
+* FFI::ConstGenerator: avoid usage of the same binary file simultaneously. #929
+
+Added:
+* Add Windows fat binary gem for Ruby-3.1
+
+Removed:
+* Remove Windows fat binary gem for Ruby < 2.4
+
+
 1.15.4 / 2021-09-01
 -------------------
 

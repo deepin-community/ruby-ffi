@@ -14,7 +14,7 @@
  *     * Neither the name of the Ruby FFI project nor the
  *       names of its contributors may be used to endorse or promote products
  *       derived from this software without specific prior written permission.
- * 
+ *
  * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
  * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
  * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
@@ -33,43 +33,81 @@
 
 #include <sys/types.h>
 #include <ruby.h>
+#if HAVE_RB_EXT_RACTOR_SAFE
+#include <ruby/ractor.h>
+#endif
 #include <ffi.h>
 #include "rbffi.h"
 #include "compat.h"
 #include "Types.h"
 #include "Type.h"
 
+static size_t type_memsize(const void *);
 
 typedef struct BuiltinType_ {
     Type type;
-    char* name;
+    const char* name;
 } BuiltinType;
 
-static void builtin_type_free(BuiltinType *);
+static size_t builtin_type_memsize(const void *);
 
 VALUE rbffi_TypeClass = Qnil;
 
 static VALUE classBuiltinType = Qnil;
 static VALUE moduleNativeType = Qnil;
-static VALUE typeMap = Qnil, sizeMap = Qnil;
-static ID id_find_type = 0, id_type_size = 0, id_size = 0;
+static VALUE typeMap = Qnil;
+static ID id_type_size = 0, id_size = 0;
+#if HAVE_RB_EXT_RACTOR_SAFE
+static rb_ractor_local_key_t custom_typedefs_key;
+#endif
+
+const rb_data_type_t rbffi_type_data_type = { /* extern */
+  .wrap_struct_name = "FFI::Type",
+  .function = {
+      .dmark = NULL,
+      .dfree = RUBY_TYPED_DEFAULT_FREE,
+      .dsize = type_memsize,
+  },
+  // IMPORTANT: WB_PROTECTED objects must only use the RB_OBJ_WRITE()
+  // macro to update VALUE references, as to trigger write barriers.
+  .flags = RUBY_TYPED_FREE_IMMEDIATELY | RUBY_TYPED_WB_PROTECTED | FFI_RUBY_TYPED_FROZEN_SHAREABLE
+};
+
+static const rb_data_type_t builtin_type_data_type = {
+  .wrap_struct_name = "FFI::Type::Builtin",
+  .function = {
+      .dmark = NULL,
+      .dfree = RUBY_TYPED_DEFAULT_FREE,
+      .dsize = builtin_type_memsize,
+  },
+  .parent = &rbffi_type_data_type,
+  // IMPORTANT: WB_PROTECTED objects must only use the RB_OBJ_WRITE()
+  // macro to update VALUE references, as to trigger write barriers.
+  .flags = RUBY_TYPED_FREE_IMMEDIATELY | RUBY_TYPED_WB_PROTECTED | FFI_RUBY_TYPED_FROZEN_SHAREABLE
+};
+
+static size_t
+type_memsize(const void *data)
+{
+    return sizeof(Type);
+}
 
 static VALUE
 type_allocate(VALUE klass)
 {
     Type* type;
-    VALUE obj = Data_Make_Struct(klass, Type, NULL, -1, type);
+    VALUE obj = TypedData_Make_Struct(klass, Type, &rbffi_type_data_type, type);
 
     type->nativeType = -1;
     type->ffiType = &ffi_type_void;
-    
+
     return obj;
 }
 
 /*
  * Document-method: initialize
  * call-seq: initialize(value)
- * @param [Fixnum,Type] value
+ * @param [Integer,Type] value
  * @return [self]
  */
 static VALUE
@@ -78,24 +116,26 @@ type_initialize(VALUE self, VALUE value)
     Type* type;
     Type* other;
 
-    Data_Get_Struct(self, Type, type);
+    TypedData_Get_Struct(self, Type, &rbffi_type_data_type, type);
 
     if (FIXNUM_P(value)) {
         type->nativeType = FIX2INT(value);
     } else if (rb_obj_is_kind_of(value, rbffi_TypeClass)) {
-        Data_Get_Struct(value, Type, other);
+        TypedData_Get_Struct(value, Type, &rbffi_type_data_type, other);
         type->nativeType = other->nativeType;
         type->ffiType = other->ffiType;
     } else {
         rb_raise(rb_eArgError, "wrong type");
     }
-    
+
+    rb_obj_freeze(self);
+
     return self;
 }
 
 /*
  * call-seq: type.size
- * @return [Fixnum]
+ * @return [Integer]
  * Return type's size, in bytes.
  */
 static VALUE
@@ -103,14 +143,14 @@ type_size(VALUE self)
 {
     Type *type;
 
-    Data_Get_Struct(self, Type, type);
+    TypedData_Get_Struct(self, Type, &rbffi_type_data_type, type);
 
     return INT2FIX(type->ffiType->size);
 }
 
 /*
  * call-seq: type.alignment
- * @return [Fixnum]
+ * @return [Integer]
  * Get Type alignment.
  */
 static VALUE
@@ -118,7 +158,7 @@ type_alignment(VALUE self)
 {
     Type *type;
 
-    Data_Get_Struct(self, Type, type);
+    TypedData_Get_Struct(self, Type, &rbffi_type_data_type, type);
 
     return INT2FIX(type->ffiType->alignment);
 }
@@ -134,9 +174,9 @@ type_inspect(VALUE self)
     char buf[100];
     Type *type;
 
-    Data_Get_Struct(self, Type, type);
+    TypedData_Get_Struct(self, Type, &rbffi_type_data_type, type);
 
-    snprintf(buf, sizeof(buf), "#<%s:%p size=%d alignment=%d>",
+    snprintf(buf, sizeof(buf), "#<%s::%p size=%d alignment=%d>",
             rb_obj_classname(self), type, (int) type->ffiType->size, (int) type->ffiType->alignment);
 
     return rb_str_new2(buf);
@@ -148,20 +188,21 @@ builtin_type_new(VALUE klass, int nativeType, ffi_type* ffiType, const char* nam
     BuiltinType* type;
     VALUE obj = Qnil;
 
-    obj = Data_Make_Struct(klass, BuiltinType, NULL, builtin_type_free, type);
-    
-    type->name = strdup(name);
+    obj = TypedData_Make_Struct(klass, BuiltinType, &builtin_type_data_type, type);
+
+    type->name = name;
     type->type.nativeType = nativeType;
     type->type.ffiType = ffiType;
+
+    rb_obj_freeze(obj);
 
     return obj;
 }
 
-static void
-builtin_type_free(BuiltinType *type)
+static size_t
+builtin_type_memsize(const void *data)
 {
-    free(type->name);
-    xfree(type);
+    return sizeof(BuiltinType) + sizeof(ffi_type);
 }
 
 /*
@@ -175,8 +216,8 @@ builtin_type_inspect(VALUE self)
     char buf[100];
     BuiltinType *type;
 
-    Data_Get_Struct(self, BuiltinType, type);
-    snprintf(buf, sizeof(buf), "#<%s:%s size=%d alignment=%d>",
+    TypedData_Get_Struct(self, BuiltinType, &builtin_type_data_type, type);
+    snprintf(buf, sizeof(buf), "#<%s::%s size=%d alignment=%d>",
             rb_obj_classname(self), type->name, (int) type->type.ffiType->size, type->type.ffiType->alignment);
 
     return rb_str_new2(buf);
@@ -186,21 +227,21 @@ int
 rbffi_type_size(VALUE type)
 {
     int t = TYPE(type);
-    
+
     if (t == T_FIXNUM || t == T_BIGNUM) {
         return NUM2INT(type);
-    
+
     } else if (t == T_SYMBOL) {
         /*
-         * Try looking up directly in the type and size maps
+         * Try looking up directly in the type map
          */
         VALUE nType;
         if ((nType = rb_hash_lookup(typeMap, type)) != Qnil) {
             if (rb_obj_is_kind_of(nType, rbffi_TypeClass)) {
                 Type* type;
-                Data_Get_Struct(nType, Type, type);
+                TypedData_Get_Struct(nType, Type, &rbffi_type_data_type, type);
                 return (int) type->ffiType->size;
-            
+
             } else if (rb_respond_to(nType, id_size)) {
                 return NUM2INT(rb_funcall2(nType, id_size, 0, NULL));
             }
@@ -208,10 +249,29 @@ rbffi_type_size(VALUE type)
 
         /* Not found - call up to the ruby version to resolve */
         return NUM2INT(rb_funcall2(rbffi_FFIModule, id_type_size, 1, &type));
-    
+
     } else {
         return NUM2INT(rb_funcall2(type, id_size, 0, NULL));
     }
+}
+
+static VALUE
+custom_typedefs(VALUE self)
+{
+#if HAVE_RB_EXT_RACTOR_SAFE
+    VALUE hash = rb_ractor_local_storage_value(custom_typedefs_key);
+    if (hash == Qnil) {
+        hash = rb_hash_new();
+        rb_ractor_local_storage_value_set(custom_typedefs_key, hash);
+    }
+#else
+    static VALUE hash = Qundef;
+    if (hash == Qundef) {
+        rb_global_variable(&hash);
+        hash = rb_hash_new();
+    }
+#endif
+    return hash;
 }
 
 VALUE
@@ -220,14 +280,20 @@ rbffi_Type_Lookup(VALUE name)
     int t = TYPE(name);
     if (t == T_SYMBOL || t == T_STRING) {
         /*
-         * Try looking up directly in the type Map
+         * Try looking up directly in the type map
          */
         VALUE nType;
+        VALUE cust = custom_typedefs(Qnil);
+
+        if ((nType = rb_hash_lookup(cust, name)) != Qnil && rb_obj_is_kind_of(nType, rbffi_TypeClass)) {
+            return nType;
+        }
+
         if ((nType = rb_hash_lookup(typeMap, name)) != Qnil && rb_obj_is_kind_of(nType, rbffi_TypeClass)) {
             return nType;
         }
     } else if (rb_obj_is_kind_of(name, rbffi_TypeClass)) {
-    
+
         return name;
     }
 
@@ -251,12 +317,14 @@ rbffi_Type_Init(VALUE moduleFFI)
      * Document-constant: FFI::TypeDefs
      */
     rb_define_const(moduleFFI, "TypeDefs", typeMap = rb_hash_new());
-    rb_define_const(moduleFFI, "SizeTypes", sizeMap = rb_hash_new());
     rb_global_variable(&typeMap);
-    rb_global_variable(&sizeMap);
-    id_find_type = rb_intern("find_type");
     id_type_size = rb_intern("type_size");
     id_size = rb_intern("size");
+
+#if HAVE_RB_EXT_RACTOR_SAFE
+    custom_typedefs_key = rb_ractor_local_storage_value_newkey();
+#endif
+    rb_define_module_function(moduleFFI, "custom_typedefs", custom_typedefs, 0);
 
     /*
      * Document-class: FFI::Type::Builtin
@@ -265,10 +333,10 @@ rbffi_Type_Init(VALUE moduleFFI)
     classBuiltinType = rb_define_class_under(rbffi_TypeClass, "Builtin", rbffi_TypeClass);
     /*
      * Document-module: FFI::NativeType
-     * This module defines constants for native (C) types.
+     * This module defines constants for C native types.
      *
      * ==Native type constants
-     * Native types are defined by constants :
+     * Native types are defined by constants and aliases:
      * * INT8, SCHAR, CHAR
      * * UINT8, UCHAR
      * * INT16, SHORT, SSHORT
@@ -281,24 +349,25 @@ rbffi_Type_Init(VALUE moduleFFI)
      * * ULONG
      * * FLOAT32, FLOAT
      * * FLOAT64, DOUBLE
+     * * LONGDOUBLE (if the native platform has `long double`)
      * * POINTER
-     * * CALLBACK
-     * * FUNCTION
-     * * CHAR_ARRAY
      * * BOOL
-     * * STRING (immutable string, nul terminated)
-     * * STRUCT (struct-b-value param or result)
-     * * ARRAY (array type definition)
-     * * MAPPED (custom native type)
-     * For function return type only :
+     * * STRING (immutable string, null terminated)
+     * For function return type only:
      * * VOID
-     * For function argument type only :
+     * For function argument type only:
      * * BUFFER_IN
      * * BUFFER_OUT
+     * * BUFFER_INOUT
      * * VARARGS (function takes a variable number of arguments)
      *
-     * All these constants are exported to {FFI} module prefixed with "TYPE_". 
-     * They are objets from {FFI::Type::Builtin} class.
+     * They are objects of the class {FFI::Type::Builtin}.
+     *
+     * Non-alias (the first name in each bullet point) constants are also exported to modules +FFI::NativeType+ and (prefixed with +TYPE_+) {FFI}.
+     * All constants and aliases above are exported to the {FFI::Type} class, as well as the following aliases:
+     * * Array ({FFI::ArrayType})
+     * * Function ({FFI::FunctionType})
+     * * Struct ({FFI::StructByValue})
      */
     moduleNativeType = rb_define_module_under(moduleFFI, "NativeType");
 
@@ -318,7 +387,7 @@ rbffi_Type_Init(VALUE moduleFFI)
     /* Make Type::Builtin non-allocatable */
     rb_undef_method(CLASS_OF(classBuiltinType), "new");
     rb_define_method(classBuiltinType, "inspect", builtin_type_inspect, 0);
-    
+
     rb_global_variable(&rbffi_TypeClass);
     rb_global_variable(&classBuiltinType);
 

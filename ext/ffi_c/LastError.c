@@ -91,30 +91,49 @@ thread_data_free(void *ptr)
 }
 
 #else
+static size_t
+thread_data_memsize(const void *data) {
+    return sizeof(ThreadData);
+}
+
+static const rb_data_type_t thread_data_data_type = {
+    .wrap_struct_name = "FFI::ThreadData",
+    .function = {
+        .dmark = NULL,
+        .dfree = RUBY_TYPED_DEFAULT_FREE,
+        .dsize = thread_data_memsize,
+    },
+    // IMPORTANT: WB_PROTECTED objects must only use the RB_OBJ_WRITE()
+    // macro to update VALUE references, as to trigger write barriers.
+    .flags = RUBY_TYPED_FREE_IMMEDIATELY | RUBY_TYPED_WB_PROTECTED
+};
+
 static ID id_thread_data;
 
 static ThreadData*
 thread_data_init(void)
 {
-    ThreadData* td;
+    ThreadData *td;
     VALUE obj;
 
-    obj = Data_Make_Struct(rb_cObject, ThreadData, NULL, -1, td);
+    obj = TypedData_Make_Struct(rb_cObject, ThreadData, &thread_data_data_type, td);
     rb_thread_local_aset(rb_thread_current(), id_thread_data, obj);
 
     return td;
 }
 
 static inline ThreadData*
-thread_data_get()
+thread_data_get(void)
 {
     VALUE obj = rb_thread_local_aref(rb_thread_current(), id_thread_data);
 
-    if (obj != Qnil && TYPE(obj) == T_DATA) {
-        return (ThreadData *) DATA_PTR(obj);
+    if (NIL_P(obj)) {
+        return thread_data_init();
     }
 
-    return thread_data_init();
+    ThreadData *td;
+    TypedData_Get_Struct(obj, ThreadData, &thread_data_data_type, td);
+    return td;
 }
 
 #endif
@@ -122,7 +141,7 @@ thread_data_get()
 
 /*
  * call-seq: error
- * @return [Numeric]
+ * @return [Integer]
  * Get +errno+ value.
  */
 static VALUE
@@ -134,7 +153,7 @@ get_last_error(VALUE self)
 #if defined(_WIN32) || defined(__CYGWIN__)
 /*
  * call-seq: winapi_error
- * @return [Numeric]
+ * @return [Integer]
  * Get +GetLastError()+ value. Only Windows or Cygwin.
  */
 static VALUE
@@ -147,14 +166,13 @@ get_last_winapi_error(VALUE self)
 
 /*
  * call-seq: error(error)
- * @param [Numeric] error
+ * @param [Integer] error
  * @return [nil]
  * Set +errno+ value.
  */
 static VALUE
 set_last_error(VALUE self, VALUE error)
 {
-
 #ifdef _WIN32
     SetLastError(NUM2INT(error));
 #else
@@ -167,7 +185,7 @@ set_last_error(VALUE self, VALUE error)
 #if defined(_WIN32) || defined(__CYGWIN__)
 /*
  * call-seq: error(error)
- * @param [Numeric] error
+ * @param [Integer] error
  * @return [nil]
  * Set +GetLastError()+ value. Only on Windows and Cygwin.
  */

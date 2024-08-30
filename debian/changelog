@@ -1,8 +1,27 @@
-ruby-ffi (1.15.4+dfsg-2) UNRELEASED; urgency=medium
+ruby-ffi (1.17.0+dfsg-1) unstable; urgency=medium
 
-  * update
+  * Team upload
+  * New upstream version 1.17.0+dfsg
+  * Bump standards version to 4.7.0
+  * Drop Testsuite, {XS,XB}-Ruby-Versions from d/control
+  * Update d/rules to clean files properly
 
- -- Debian Ruby Team <pkg-ruby-extras-maintainers@lists.alioth.debian.org>  Thu, 21 Jul 2022 10:42:38 +0800
+ -- Ananthu C V <weepingclown@disroot.org>  Tue, 02 Jul 2024 01:36:18 +0530
+
+ruby-ffi (1.16.3+dfsg-1) unstable; urgency=medium
+
+  * Team upload.
+  * New upstream version 1.16.3+dfsg
+  * Add loongarch64-linux support (Closes: #1051378)
+
+ -- TANIGUCHI Takaki <takaki@debian.org>  Fri, 17 Nov 2023 15:54:13 +0900
+
+ruby-ffi (1.15.5+dfsg-1) unstable; urgency=medium
+
+  * Team upload.
+  * New upstream release.
+
+ -- Lucas Kanashiro <kanashiro@debian.org>  Mon, 31 Oct 2022 09:48:33 -0300
 
 ruby-ffi (1.15.4+dfsg-2) unstable; urgency=medium
 
