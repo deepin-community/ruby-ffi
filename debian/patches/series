@@ -1,3 +1,4 @@
 remove-git-in-gemspec.patch
 read-version.patch
 keep-longdouble-adj-sizeof-long-double.patch
+0001-deepin-sw_64-support.diff
