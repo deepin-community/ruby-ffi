@@ -10,11 +10,10 @@ export DH_RUBY = --gem-install
 %:
 	dh $@ --buildsystem=ruby --with ruby
 
-override_dh_auto_clean:
-	dh_auto_clean
+execute_after_dh_auto_clean:
 	rm -rf build/
-	rm -f spec/ffi/fixtures/*.so
-	rm -f spec/ffi/fixtures/*.o
+	find spec/ffi/fixtures/ \( -name *.so -o -name *.o \) -delete
+	find spec/ffi/embed-test/ \( -name *.so -o -name *.o -o -name Makefile -o -name *.log \) -delete
 
 gen_arch_config:
 	(cd ext/ffi_c && ruby extconf.rb && make && cp ffi_c.so ../../lib)

@@ -32,26 +32,6 @@
 
 #include <ruby.h>
 
-#ifndef RARRAY_LEN
-#  define RARRAY_LEN(ary) RARRAY(ary)->len
-#endif
-
-#ifndef RARRAY_PTR
-#  define RARRAY_PTR(ary) RARRAY(ary)->ptr
-#endif
-
-#ifndef RSTRING_LEN
-#  define RSTRING_LEN(s) RSTRING(s)->len
-#endif
-
-#ifndef RSTRING_PTR
-#  define RSTRING_PTR(s) RSTRING(s)->ptr
-#endif
-
-#ifndef NUM2ULL
-#  define NUM2ULL(x) rb_num2ull((VALUE)x)
-#endif
-
 #ifndef roundup
 #  define roundup(x, y)   ((((x)+((y)-1))/(y))*(y))
 #endif
@@ -75,8 +55,28 @@
 #  define MIN(a, b) ((a) < (b) ? (a) : (b))
 #endif
 
-#ifndef RB_GC_GUARD
-#  define RB_GC_GUARD(x) (x)
+
+
+/* For compatibility with ruby < 2.7 */
+#ifdef HAVE_RB_GC_MARK_MOVABLE
+#define ffi_compact_callback(x) .dcompact = (x),
+#define ffi_gc_location(x) x = rb_gc_location(x)
+#else
+#define rb_gc_mark_movable(x) rb_gc_mark(x)
+#define ffi_compact_callback(x)
+#define ffi_gc_location(x)
+#endif
+
+
+/* For compatibility with ruby < 3.0 */
+#ifndef RUBY_TYPED_FROZEN_SHAREABLE
+#define FFI_RUBY_TYPED_FROZEN_SHAREABLE 0
+#else
+#define FFI_RUBY_TYPED_FROZEN_SHAREABLE RUBY_TYPED_FROZEN_SHAREABLE
+#endif
+
+#ifndef HAVE_RB_EXT_RACTOR_SAFE
+#define rb_ractor_make_shareable(self) rb_obj_freeze(self);
 #endif
 
 #endif /* RBFFI_COMPAT_H */

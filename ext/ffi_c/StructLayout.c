@@ -51,9 +51,13 @@
 
 #define FFI_ALIGN(v, a)  (((((size_t) (v))-1) | ((a)-1))+1)
 
-static void struct_layout_mark(StructLayout *);
-static void struct_layout_free(StructLayout *);
-static void struct_field_mark(StructField* );
+static void struct_layout_mark(void *);
+static void struct_layout_compact(void *);
+static void struct_layout_free(void *);
+static size_t struct_layout_memsize(const void *);
+static void struct_field_mark(void *);
+static void struct_field_compact(void *);
+static size_t struct_field_memsize(const void *);
 
 VALUE rbffi_StructLayoutFieldClass = Qnil;
 VALUE rbffi_StructLayoutNumberFieldClass = Qnil, rbffi_StructLayoutPointerFieldClass = Qnil;
@@ -62,6 +66,33 @@ VALUE rbffi_StructLayoutFunctionFieldClass = Qnil, rbffi_StructLayoutArrayFieldC
 
 VALUE rbffi_StructLayoutClass = Qnil;
 
+const rb_data_type_t rbffi_struct_layout_data_type = { /* extern */
+  .wrap_struct_name = "FFI::StructLayout",
+  .function = {
+      .dmark = struct_layout_mark,
+      .dfree = struct_layout_free,
+      .dsize = struct_layout_memsize,
+      ffi_compact_callback( struct_layout_compact )
+  },
+  .parent = &rbffi_type_data_type,
+  // IMPORTANT: WB_PROTECTED objects must only use the RB_OBJ_WRITE()
+  // macro to update VALUE references, as to trigger write barriers.
+  .flags = RUBY_TYPED_FREE_IMMEDIATELY | RUBY_TYPED_WB_PROTECTED | FFI_RUBY_TYPED_FROZEN_SHAREABLE
+};
+
+const rb_data_type_t rbffi_struct_field_data_type = { /* extern */
+  .wrap_struct_name = "FFI::StructField",
+  .function = {
+      .dmark = struct_field_mark,
+      .dfree = RUBY_TYPED_DEFAULT_FREE,
+      .dsize = struct_field_memsize,
+      ffi_compact_callback( struct_field_compact )
+  },
+  .parent = &rbffi_type_data_type,
+  // IMPORTANT: WB_PROTECTED objects must only use the RB_OBJ_WRITE()
+  // macro to update VALUE references, as to trigger write barriers.
+  .flags = RUBY_TYPED_FREE_IMMEDIATELY | RUBY_TYPED_WB_PROTECTED | FFI_RUBY_TYPED_FROZEN_SHAREABLE
+};
 
 static VALUE
 struct_field_allocate(VALUE klass)
@@ -69,24 +100,39 @@ struct_field_allocate(VALUE klass)
     StructField* field;
     VALUE obj;
 
-    obj = Data_Make_Struct(klass, StructField, struct_field_mark, -1, field);
-    field->rbType = Qnil;
-    field->rbName = Qnil;
+    obj = TypedData_Make_Struct(klass, StructField, &rbffi_struct_field_data_type, field);
+    RB_OBJ_WRITE(obj, &field->rbType, Qnil);
+    RB_OBJ_WRITE(obj, &field->rbName, Qnil);
 
     return obj;
 }
 
 static void
-struct_field_mark(StructField* f)
+struct_field_mark(void *data)
 {
-    rb_gc_mark(f->rbType);
-    rb_gc_mark(f->rbName);
+    StructField *f = (StructField *)data;
+    rb_gc_mark_movable(f->rbType);
+    rb_gc_mark_movable(f->rbName);
+}
+
+static void
+struct_field_compact(void *data)
+{
+    StructField *f = (StructField *)data;
+    ffi_gc_location(f->rbType);
+    ffi_gc_location(f->rbName);
+}
+
+static size_t
+struct_field_memsize(const void *data)
+{
+    return sizeof(StructField);
 }
 
 /*
  * call-seq: initialize(name, offset, type)
  * @param [String,Symbol] name
- * @param [Fixnum] offset
+ * @param [Integer] offset
  * @param [FFI::Type] type
  * @return [self]
  * A new FFI::StructLayout::Field instance.
@@ -98,7 +144,7 @@ struct_field_initialize(int argc, VALUE* argv, VALUE self)
     StructField* field;
     int nargs;
 
-    Data_Get_Struct(self, StructField, field);
+    TypedData_Get_Struct(self, StructField, &rbffi_struct_field_data_type, field);
 
     nargs = rb_scan_args(argc, argv, "3", &rbName, &rbOffset, &rbType);
 
@@ -115,9 +161,9 @@ struct_field_initialize(int argc, VALUE* argv, VALUE self)
     }
 
     field->offset = NUM2UINT(rbOffset);
-    field->rbName = (TYPE(rbName) == T_SYMBOL) ? rbName : rb_str_intern(rbName);
-    field->rbType = rbType;
-    Data_Get_Struct(field->rbType, Type, field->type);
+    RB_OBJ_WRITE(self, &field->rbName, (TYPE(rbName) == T_SYMBOL) ? rbName : rb_str_intern(rbName));
+    RB_OBJ_WRITE(self, &field->rbType, rbType);
+    TypedData_Get_Struct(field->rbType, Type, &rbffi_type_data_type, field->type);
     field->memoryOp = get_memory_op(field->type);
     field->referenceIndex = -1;
 
@@ -135,45 +181,47 @@ struct_field_initialize(int argc, VALUE* argv, VALUE self)
             break;
     }
 
+    rb_obj_freeze(self);
+
     return self;
 }
 
 /*
  * call-seq: offset
- * @return [Numeric]
+ * @return [Integer]
  * Get the field offset.
  */
 static VALUE
 struct_field_offset(VALUE self)
 {
     StructField* field;
-    Data_Get_Struct(self, StructField, field);
+    TypedData_Get_Struct(self, StructField, &rbffi_struct_field_data_type, field);
     return UINT2NUM(field->offset);
 }
 
 /*
  * call-seq: size
- * @return [Numeric]
+ * @return [Integer]
  * Get the field size.
  */
 static VALUE
 struct_field_size(VALUE self)
 {
     StructField* field;
-    Data_Get_Struct(self, StructField, field);
+    TypedData_Get_Struct(self, StructField, &rbffi_struct_field_data_type, field);
     return UINT2NUM(field->type->ffiType->size);
 }
 
 /*
  * call-seq: alignment
- * @return [Numeric]
+ * @return [Integer]
  * Get the field alignment.
  */
 static VALUE
 struct_field_alignment(VALUE self)
 {
     StructField* field;
-    Data_Get_Struct(self, StructField, field);
+    TypedData_Get_Struct(self, StructField, &rbffi_struct_field_data_type, field);
     return UINT2NUM(field->type->ffiType->alignment);
 }
 
@@ -186,7 +234,7 @@ static VALUE
 struct_field_type(VALUE self)
 {
     StructField* field;
-    Data_Get_Struct(self, StructField, field);
+    TypedData_Get_Struct(self, StructField, &rbffi_struct_field_data_type, field);
 
     return field->rbType;
 }
@@ -200,7 +248,7 @@ static VALUE
 struct_field_name(VALUE self)
 {
     StructField* field;
-    Data_Get_Struct(self, StructField, field);
+    TypedData_Get_Struct(self, StructField, &rbffi_struct_field_data_type, field);
     return field->rbName;
 }
 
@@ -215,7 +263,7 @@ struct_field_get(VALUE self, VALUE pointer)
 {
     StructField* f;
 
-    Data_Get_Struct(self, StructField, f);
+    TypedData_Get_Struct(self, StructField, &rbffi_struct_field_data_type, f);
     if (f->memoryOp == NULL) {
         rb_raise(rb_eArgError, "get not supported for %s", rb_obj_classname(f->rbType));
         return Qnil;
@@ -236,7 +284,7 @@ struct_field_put(VALUE self, VALUE pointer, VALUE value)
 {
     StructField* f;
 
-    Data_Get_Struct(self, StructField, f);
+    TypedData_Get_Struct(self, StructField, &rbffi_struct_field_data_type, f);
     if (f->memoryOp == NULL) {
         rb_raise(rb_eArgError, "put not supported for %s", rb_obj_classname(f->rbType));
         return self;
@@ -258,7 +306,7 @@ function_field_get(VALUE self, VALUE pointer)
 {
     StructField* f;
 
-    Data_Get_Struct(self, StructField, f);
+    TypedData_Get_Struct(self, StructField, &rbffi_struct_field_data_type, f);
 
     return rbffi_Function_NewInstance(f->rbType, (*rbffi_AbstractMemoryOps.pointer->get)(MEMORY(pointer), f->offset));
 }
@@ -278,7 +326,7 @@ function_field_put(VALUE self, VALUE pointer, VALUE proc)
     StructField* f;
     VALUE value = Qnil;
 
-    Data_Get_Struct(self, StructField, f);
+    TypedData_Get_Struct(self, StructField, &rbffi_struct_field_data_type, f);
 
     if (NIL_P(proc) || rb_obj_is_kind_of(proc, rbffi_FunctionClass)) {
         value = proc;
@@ -313,8 +361,8 @@ array_field_get(VALUE self, VALUE pointer)
     ArrayType* array;
     VALUE argv[2];
 
-    Data_Get_Struct(self, StructField, f);
-    Data_Get_Struct(f->rbType, ArrayType, array);
+    TypedData_Get_Struct(self, StructField, &rbffi_struct_field_data_type, f);
+    TypedData_Get_Struct(f->rbType, ArrayType, &rbffi_array_type_data_type, array);
 
     argv[0] = pointer;
     argv[1] = self;
@@ -336,9 +384,8 @@ array_field_put(VALUE self, VALUE pointer, VALUE value)
     StructField* f;
     ArrayType* array;
 
-
-    Data_Get_Struct(self, StructField, f);
-    Data_Get_Struct(f->rbType, ArrayType, array);
+    TypedData_Get_Struct(self, StructField, &rbffi_struct_field_data_type, f);
+    TypedData_Get_Struct(f->rbType, ArrayType, &rbffi_array_type_data_type, array);
 
     if (isCharArray(array) && rb_obj_is_instance_of(value, rb_cString)) {
         VALUE argv[2];
@@ -385,12 +432,8 @@ array_field_put(VALUE self, VALUE pointer, VALUE value)
                 VALUE entry = rb_ary_entry(value, i);
                 Struct* s;
 
-                if (!rb_obj_is_kind_of(entry, rbffi_StructClass)) {
-                    rb_raise(rb_eTypeError, "array element not an instance of FFI::Struct");
-                    break;
-                }
+                TypedData_Get_Struct(entry, Struct, &rbffi_struct_data_type, s);
 
-                Data_Get_Struct(entry, Struct, s);
                 checkRead(s->pointer);
                 checkBounds(s->pointer, 0, array->componentType->ffiType->size);
 
@@ -416,10 +459,10 @@ struct_layout_allocate(VALUE klass)
     StructLayout* layout;
     VALUE obj;
 
-    obj = Data_Make_Struct(klass, StructLayout, struct_layout_mark, struct_layout_free, layout);
-    layout->rbFieldMap = Qnil;
-    layout->rbFieldNames = Qnil;
-    layout->rbFields = Qnil;
+    obj = TypedData_Make_Struct(klass, StructLayout, &rbffi_struct_layout_data_type, layout);
+    RB_OBJ_WRITE(obj, &layout->rbFieldMap, Qnil);
+    RB_OBJ_WRITE(obj, &layout->rbFieldNames, Qnil);
+    RB_OBJ_WRITE(obj, &layout->rbFields, Qnil);
     layout->base.ffiType = xcalloc(1, sizeof(*layout->base.ffiType));
     layout->base.ffiType->size = 0;
     layout->base.ffiType->alignment = 0;
@@ -431,8 +474,8 @@ struct_layout_allocate(VALUE klass)
 /*
  * call-seq: initialize(fields, size, align)
  * @param [Array<StructLayout::Field>] fields
- * @param [Numeric] size
- * @param [Numeric] align
+ * @param [Integer] size
+ * @param [Integer] align
  * @return [self]
  * A new StructLayout instance.
  */
@@ -443,15 +486,15 @@ struct_layout_initialize(VALUE self, VALUE fields, VALUE size, VALUE align)
     ffi_type* ltype;
     int i;
 
-    Data_Get_Struct(self, StructLayout, layout);
-    layout->fieldCount = (int) RARRAY_LEN(fields);
-    layout->rbFieldMap = rb_hash_new();
-    layout->rbFieldNames = rb_ary_new2(layout->fieldCount);
+    TypedData_Get_Struct(self, StructLayout, &rbffi_struct_layout_data_type, layout);
+    layout->fieldCount = RARRAY_LENINT(fields);
+    RB_OBJ_WRITE(self, &layout->rbFieldMap, rb_hash_new());
+    RB_OBJ_WRITE(self, &layout->rbFieldNames, rb_ary_new2(layout->fieldCount));
     layout->size = (int) FFI_ALIGN(NUM2INT(size),  NUM2INT(align));
     layout->align = NUM2INT(align);
     layout->fields = xcalloc(layout->fieldCount, sizeof(StructField *));
     layout->ffiTypes = xcalloc(layout->fieldCount + 1, sizeof(ffi_type *));
-    layout->rbFields = rb_ary_new2(layout->fieldCount);
+    RB_OBJ_WRITE(self, &layout->rbFields, rb_ary_new2(layout->fieldCount));
     layout->referenceFieldCount = 0;
     layout->base.ffiType->elements = layout->ffiTypes;
     layout->base.ffiType->size = layout->size;
@@ -470,7 +513,7 @@ struct_layout_initialize(VALUE self, VALUE fields, VALUE size, VALUE align)
         }
         rbName = rb_funcall2(rbField, rb_intern("name"), 0, NULL);
 
-        Data_Get_Struct(rbField, StructField, field);
+        TypedData_Get_Struct(rbField, StructField, &rbffi_struct_field_data_type, field);
         layout->fields[i] = field;
 
         if (field->type == NULL || field->type->ffiType == NULL) {
@@ -497,6 +540,11 @@ struct_layout_initialize(VALUE self, VALUE fields, VALUE size, VALUE align)
         rb_raise(rb_eRuntimeError, "Struct size is zero");
     }
 
+    rb_obj_freeze(layout->rbFieldMap);
+    rb_obj_freeze(layout->rbFields);
+    rb_obj_freeze(layout->rbFieldNames);
+    rb_obj_freeze(self);
+
     return self;
 }
 
@@ -515,7 +563,7 @@ struct_layout_union_bang(VALUE self)
     ffi_type *t = NULL;
     int count, i;
 
-    Data_Get_Struct(self, StructLayout, layout);
+    TypedData_Get_Struct(self, StructLayout, &rbffi_struct_layout_data_type, layout);
 
     for (i = 0; alignment_types[i] != NULL; ++i) {
         if (alignment_types[i]->alignment == layout->align) {
@@ -545,7 +593,7 @@ struct_layout_aref(VALUE self, VALUE field)
 {
     StructLayout* layout;
 
-    Data_Get_Struct(self, StructLayout, layout);
+    TypedData_Get_Struct(self, StructLayout, &rbffi_struct_layout_data_type, layout);
 
     return rb_hash_aref(layout->rbFieldMap, field);
 }
@@ -560,7 +608,7 @@ struct_layout_fields(VALUE self)
 {
     StructLayout* layout;
 
-    Data_Get_Struct(self, StructLayout, layout);
+    TypedData_Get_Struct(self, StructLayout, &rbffi_struct_layout_data_type, layout);
 
     return rb_ary_dup(layout->rbFields);
 }
@@ -575,7 +623,7 @@ struct_layout_members(VALUE self)
 {
     StructLayout* layout;
 
-    Data_Get_Struct(self, StructLayout, layout);
+    TypedData_Get_Struct(self, StructLayout, &rbffi_struct_layout_data_type, layout);
 
     return rb_ary_dup(layout->rbFieldNames);
 }
@@ -590,32 +638,53 @@ struct_layout_to_a(VALUE self)
 {
     StructLayout* layout;
 
-    Data_Get_Struct(self, StructLayout, layout);
+    TypedData_Get_Struct(self, StructLayout, &rbffi_struct_layout_data_type, layout);
 
     return rb_ary_dup(layout->rbFields);
 }
 
 static void
-struct_layout_mark(StructLayout *layout)
+struct_layout_mark(void *data)
 {
-    rb_gc_mark(layout->rbFieldMap);
-    rb_gc_mark(layout->rbFieldNames);
-    rb_gc_mark(layout->rbFields);
-    /* Clear the cache, to be safe from changes of fieldName VALUE by GC.compact.
-     * TODO: Move cache clearing to compactation callback provided by Ruby-2.7+.
-     */
+    StructLayout *layout = (StructLayout *)data;
+    rb_gc_mark_movable(layout->rbFieldMap);
+    rb_gc_mark_movable(layout->rbFieldNames);
+    rb_gc_mark_movable(layout->rbFields);
+    /* The values stored in layout->cache_row.fieldName are primary stored in layout->rbFieldMap and are marked there */
+}
+
+static void
+struct_layout_compact(void *data)
+{
+    StructLayout *layout = (StructLayout *)data;
+    ffi_gc_location(layout->rbFieldMap);
+    ffi_gc_location(layout->rbFieldNames);
+    ffi_gc_location(layout->rbFields);
+
+    /* Clear the cache, to be safe from changes of fieldName VALUE by GC.compact */
     memset(&layout->cache_row, 0, sizeof(layout->cache_row));
 }
 
 static void
-struct_layout_free(StructLayout *layout)
+struct_layout_free(void *data)
 {
+    StructLayout *layout = (StructLayout *)data;
     xfree(layout->ffiTypes);
     xfree(layout->base.ffiType);
     xfree(layout->fields);
     xfree(layout);
 }
 
+
+static size_t
+struct_layout_memsize(const void * data)
+{
+    const StructLayout *layout = (const StructLayout *)data;
+    size_t memsize = sizeof(StructLayout);
+    memsize += layout->fieldCount * (sizeof(StructField *) + sizeof(ffi_type *));
+    memsize += sizeof(*layout->base.ffiType);
+    return memsize;
+}
 
 void
 rbffi_StructLayout_Init(VALUE moduleFFI)

@@ -33,7 +33,11 @@ if RUBY_ENGINE == 'ruby' || RUBY_ENGINE == 'rbx'
   $CFLAGS.gsub!(/[\s+]-ansi/, '')
   $CFLAGS.gsub!(/[\s+]-std=[^\s]+/, '')
   # solaris 10 needs -c99 for <stdbool.h>
-  $CFLAGS << " -std=c99" if RbConfig::CONFIG['host_os'] =~ /solaris(!?2\.11)/
+  $CFLAGS << " -g -std=c99" if RbConfig::CONFIG['host_os'] =~ /solaris(!?2\.11)/
+  if enable_config("debug")
+    $CPPFLAGS += " #{RbConfig::CONFIG["debugflags"]}"
+    $LDFLAGS += " #{RbConfig::CONFIG["debugflags"]}"
+  end
 
   # Check whether we use system libffi
   system_libffi = enable_config('system-libffi', :try)
@@ -57,10 +61,13 @@ if RUBY_ENGINE == 'ruby' || RUBY_ENGINE == 'rbx'
     append_ldflags "-Wl,--exclude-libs,ALL"
   end
 
+  have_func 'rb_gc_mark_movable' # since ruby-2.7
+
   # Some linux archs need explicit linking to pthread, see https://github.com/ffi/ffi/issues/893
   append_ldflags "-pthread"
 
   ffi_alloc_default = RbConfig::CONFIG['host_os'] =~ /darwin/i && RbConfig::CONFIG['host'] =~ /arm|aarch64/i
+  ffi_alloc_default = ffi_alloc_default || RbConfig::CONFIG['host'] =~ /hppa/i
   if enable_config('libffi-alloc', ffi_alloc_default)
     $defs << "-DUSE_FFI_ALLOC"
   end
@@ -72,7 +79,17 @@ if RUBY_ENGINE == 'ruby' || RUBY_ENGINE == 'rbx'
 
   unless system_libffi
     File.open("Makefile", "a") do |mf|
-      mf.puts "LIBFFI_HOST=--host=#{RbConfig::CONFIG['host_alias']}" if RbConfig::CONFIG.has_key?("host_alias")
+      if enable_config("debug")
+        mf.puts "LIBFFI_DEBUG=--enable-debug CPPFLAGS='#{RbConfig::CONFIG["debugflags"]}' LDFLAGS='#{RbConfig::CONFIG["debugflags"]}'"
+      end
+
+      if RbConfig::CONFIG['host_alias'] == "i386-w64-mingw32"
+        host = "i686-w64-mingw32" # Work around host name without matching compiler name in rake-compiler-dock-1.3.0 on platform x86-mingw32
+      elsif RbConfig::CONFIG.has_key?("host_alias")
+        host = RbConfig::CONFIG['host_alias']
+      end
+      mf.puts "LIBFFI_HOST=--host=#{host}" if host
+
       if RbConfig::CONFIG['host_os'] =~ /darwin/i
         if RbConfig::CONFIG['host'] =~ /arm|aarch64/i
           mf.puts "LIBFFI_HOST=--host=aarch64-apple-#{RbConfig::CONFIG['host_os']}"

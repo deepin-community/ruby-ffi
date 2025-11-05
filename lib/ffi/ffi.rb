@@ -28,9 +28,11 @@
 # OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+require 'ffi/compat'
 require 'ffi/platform'
 require 'ffi/data_converter'
 require 'ffi/types'
+require 'ffi/library_path'
 require 'ffi/library'
 require 'ffi/errno'
 require 'ffi/abstract_memory'
@@ -45,3 +47,4 @@ require 'ffi/autopointer'
 require 'ffi/variadic'
 require 'ffi/enum'
 require 'ffi/version'
+require 'ffi/function'

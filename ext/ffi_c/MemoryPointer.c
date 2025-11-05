@@ -39,13 +39,14 @@
 
 
 static VALUE memptr_allocate(VALUE klass);
-static void memptr_release(Pointer* ptr);
+static void memptr_release(void *data);
+static size_t memptr_memsize(const void *data);
 static VALUE memptr_malloc(VALUE self, long size, long count, bool clear);
 static VALUE memptr_free(VALUE self);
 
 VALUE rbffi_MemoryPointerClass;
 
-#define MEMPTR(obj) ((MemoryPointer *) rbffi_AbstractMemory_Cast(obj, rbffi_MemoryPointerClass))
+#define MEMPTR(obj) ((MemoryPointer *) rbffi_AbstractMemory_Cast(obj, &memory_pointer_data_type))
 
 VALUE
 rbffi_MemoryPointer_NewInstance(long size, long count, bool clear)
@@ -53,12 +54,25 @@ rbffi_MemoryPointer_NewInstance(long size, long count, bool clear)
     return memptr_malloc(memptr_allocate(rbffi_MemoryPointerClass), size, count, clear);
 }
 
+static const rb_data_type_t memory_pointer_data_type = {
+    .wrap_struct_name = "FFI::MemoryPointer",
+    .function = {
+        .dmark = NULL,
+        .dfree = memptr_release,
+        .dsize = memptr_memsize,
+    },
+    .parent = &rbffi_pointer_data_type,
+    // IMPORTANT: WB_PROTECTED objects must only use the RB_OBJ_WRITE()
+    // macro to update VALUE references, as to trigger write barriers.
+    .flags = RUBY_TYPED_FREE_IMMEDIATELY | RUBY_TYPED_WB_PROTECTED | FFI_RUBY_TYPED_FROZEN_SHAREABLE
+};
+
 static VALUE
 memptr_allocate(VALUE klass)
 {
     Pointer* p;
-    VALUE obj = Data_Make_Struct(klass, Pointer, NULL, memptr_release, p);
-    p->rbParent = Qnil;
+    VALUE obj = TypedData_Make_Struct(klass, Pointer, &memory_pointer_data_type, p);
+    RB_OBJ_WRITE(obj, &p->rbParent, Qnil);
     p->memory.flags = MEM_RD | MEM_WR;
 
     return obj;
@@ -66,8 +80,8 @@ memptr_allocate(VALUE klass)
 
 /*
  * call-seq: initialize(size, count=1, clear=true)
- * @param [Fixnum, Bignum, Symbol, FFI::Type] size size of a memory cell (in bytes, or type whom size will be used)
- * @param [Numeric] count number of cells in memory
+ * @param [Integer, Symbol, FFI::Type] size size of a memory cell (in bytes, or type whom size will be used)
+ * @param [Integer] count number of cells in memory
  * @param [Boolean] clear set memory to all-zero if +true+
  * @return [self]
  * A new instance of FFI::MemoryPointer.
@@ -94,7 +108,7 @@ memptr_malloc(VALUE self, long size, long count, bool clear)
     Pointer* p;
     unsigned long msize;
 
-    Data_Get_Struct(self, Pointer, p);
+    TypedData_Get_Struct(self, Pointer, &memory_pointer_data_type, p);
 
     msize = size * count;
 
@@ -122,7 +136,8 @@ memptr_free(VALUE self)
 {
     Pointer* ptr;
 
-    Data_Get_Struct(self, Pointer, ptr);
+    rb_check_frozen(self);
+    TypedData_Get_Struct(self, Pointer, &memory_pointer_data_type, ptr);
 
     if (ptr->allocated) {
         if (ptr->storage != NULL) {
@@ -136,13 +151,25 @@ memptr_free(VALUE self)
 }
 
 static void
-memptr_release(Pointer* ptr)
+memptr_release(void *data)
 {
+    Pointer *ptr = (Pointer *)data;
     if (ptr->autorelease && ptr->allocated && ptr->storage != NULL) {
         xfree(ptr->storage);
         ptr->storage = NULL;
     }
     xfree(ptr);
+}
+
+static size_t
+memptr_memsize(const void *data)
+{
+    const Pointer *ptr = (const Pointer *)data;
+    size_t memsize = sizeof(Pointer);
+    if (ptr->allocated) {
+        memsize += ptr->memory.size;
+    }
+    return memsize;
 }
 
 /*
