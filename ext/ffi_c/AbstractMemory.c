@@ -55,21 +55,30 @@
 # define RB_OBJ_STRING(obj) StringValueCStr(obj)
 #endif
 
+static size_t memsize(const void *data);
 static inline char* memory_address(VALUE self);
 VALUE rbffi_AbstractMemoryClass = Qnil;
 static VALUE NullPointerErrorClass = Qnil;
 static ID id_to_ptr = 0, id_plus = 0, id_call = 0;
 
-static VALUE
-memory_allocate(VALUE klass)
-{
-    AbstractMemory* memory;
-    VALUE obj;
-    obj = Data_Make_Struct(klass, AbstractMemory, NULL, -1, memory);
-    memory->flags = MEM_RD | MEM_WR;
+const rb_data_type_t rbffi_abstract_memory_data_type = { /* extern */
+    .wrap_struct_name = "FFI::AbstractMemory",
+    .function = {
+        .dmark = NULL,
+        .dfree = RUBY_TYPED_DEFAULT_FREE,
+        .dsize = memsize,
+    },
+    // IMPORTANT: WB_PROTECTED objects must only use the RB_OBJ_WRITE()
+    // macro to update VALUE references, as to trigger write barriers.
+    .flags = RUBY_TYPED_FREE_IMMEDIATELY | RUBY_TYPED_WB_PROTECTED | FFI_RUBY_TYPED_FROZEN_SHAREABLE
+};
 
-    return obj;
+static size_t
+memsize(const void *data)
+{
+    return sizeof(AbstractMemory);
 }
+
 #define VAL(x, swap) (unlikely(((memory->flags & MEM_SWAP) != 0)) ? swap((x)) : (x))
 
 #define NUM_OP(name, type, toNative, fromNative, swap) \
@@ -87,7 +96,7 @@ static VALUE \
 memory_put_##name(VALUE self, VALUE offset, VALUE value) \
 { \
     AbstractMemory* memory; \
-    Data_Get_Struct(self, AbstractMemory, memory); \
+    TypedData_Get_Struct(self, AbstractMemory, &rbffi_abstract_memory_data_type, memory); \
     memory_op_put_##name(memory, NUM2LONG(offset), value); \
     return self; \
 } \
@@ -96,7 +105,7 @@ static VALUE \
 memory_write_##name(VALUE self, VALUE value) \
 { \
     AbstractMemory* memory; \
-    Data_Get_Struct(self, AbstractMemory, memory); \
+    TypedData_Get_Struct(self, AbstractMemory, &rbffi_abstract_memory_data_type, memory); \
     memory_op_put_##name(memory, 0, value); \
     return self; \
 } \
@@ -115,7 +124,7 @@ static VALUE \
 memory_get_##name(VALUE self, VALUE offset) \
 { \
     AbstractMemory* memory; \
-    Data_Get_Struct(self, AbstractMemory, memory); \
+    TypedData_Get_Struct(self, AbstractMemory, &rbffi_abstract_memory_data_type, memory); \
     return memory_op_get_##name(memory, NUM2LONG(offset)); \
 } \
 static VALUE memory_read_##name(VALUE self); \
@@ -123,7 +132,7 @@ static VALUE \
 memory_read_##name(VALUE self) \
 { \
     AbstractMemory* memory; \
-    Data_Get_Struct(self, AbstractMemory, memory); \
+    TypedData_Get_Struct(self, AbstractMemory, &rbffi_abstract_memory_data_type, memory); \
     return memory_op_get_##name(memory, 0); \
 } \
 static MemoryOp memory_op_##name = { memory_op_get_##name, memory_op_put_##name }; \
@@ -141,7 +150,7 @@ memory_put_array_of_##name(VALUE self, VALUE offset, VALUE ary) \
     if (likely(count > 0)) checkWrite(memory); \
     checkBounds(memory, off, count * sizeof(type)); \
     for (i = 0; i < count; i++) { \
-        type tmp = (type) VAL(toNative(RARRAY_PTR(ary)[i]), swap); \
+        type tmp = (type) VAL(toNative(RARRAY_AREF(ary, i)), swap); \
         memcpy(memory->address + off + (i * sizeof(type)), &tmp, sizeof(tmp)); \
     } \
     return self; \
@@ -307,6 +316,7 @@ static VALUE
 memory_clear(VALUE self)
 {
     AbstractMemory* ptr = MEMORY(self);
+    checkWrite(ptr);
     memset(ptr->address, 0, ptr->size);
     return self;
 }
@@ -314,14 +324,14 @@ memory_clear(VALUE self)
 /*
  * call-seq: memory.size
  * Return memory size in bytes (alias: #total)
- * @return [Numeric]
+ * @return [Integer]
  */
 static VALUE
 memory_size(VALUE self)
 {
     AbstractMemory* ptr;
 
-    Data_Get_Struct(self, AbstractMemory, ptr);
+    TypedData_Get_Struct(self, AbstractMemory, &rbffi_abstract_memory_data_type, ptr);
 
     return LONG2NUM(ptr->size);
 }
@@ -330,7 +340,7 @@ memory_size(VALUE self)
  * call-seq: memory.get(type, offset)
  * Return data of given type contained in memory.
  * @param [Symbol, Type] type_name type of data to get
- * @param [Numeric] offset point in buffer to start from
+ * @param [Integer] offset point in buffer to start from
  * @return [Object]
  * @raise {ArgumentError} if type is not supported
  */
@@ -340,14 +350,15 @@ memory_get(VALUE self, VALUE type_name, VALUE offset)
     AbstractMemory* ptr;
     VALUE nType;
     Type *type;
+    MemoryOp *op;
 
     nType = rbffi_Type_Lookup(type_name);
     if(NIL_P(nType)) goto undefined_type;
 
-    Data_Get_Struct(self, AbstractMemory, ptr);
-    Data_Get_Struct(nType, Type, type);
+    TypedData_Get_Struct(self, AbstractMemory, &rbffi_abstract_memory_data_type, ptr);
+    TypedData_Get_Struct(nType, Type, &rbffi_type_data_type, type);
 
-    MemoryOp *op = get_memory_op(type);
+    op = get_memory_op(type);
     if(op == NULL) goto undefined_type;
 
     return op->get(ptr, NUM2LONG(offset));
@@ -362,7 +373,7 @@ undefined_type: {
 /*
  * call-seq: memory.put(type, offset, value)
  * @param [Symbol, Type] type_name type of data to put
- * @param [Numeric] offset point in buffer to start from
+ * @param [Integer] offset point in buffer to start from
  * @return [nil]
  * @raise {ArgumentError} if type is not supported
  */
@@ -372,14 +383,15 @@ memory_put(VALUE self, VALUE type_name, VALUE offset, VALUE value)
     AbstractMemory* ptr;
     VALUE nType;
     Type *type;
+    MemoryOp *op;
 
     nType = rbffi_Type_Lookup(type_name);
     if(NIL_P(nType)) goto undefined_type;
 
-    Data_Get_Struct(self, AbstractMemory, ptr);
-    Data_Get_Struct(nType, Type, type);
+    TypedData_Get_Struct(self, AbstractMemory, &rbffi_abstract_memory_data_type, ptr);
+    TypedData_Get_Struct(nType, Type, &rbffi_type_data_type, type);
 
-    MemoryOp *op = get_memory_op(type);
+    op = get_memory_op(type);
     if(op == NULL) goto undefined_type;
 
     op->put(ptr, NUM2LONG(offset), value);
@@ -395,8 +407,8 @@ undefined_type: {
 /*
  * call-seq: memory.get_string(offset, length=nil)
  * Return string contained in memory.
- * @param [Numeric] offset point in buffer to start from
- * @param [Numeric] length string's length in bytes. If nil, a (memory size - offset) length string is returned).
+ * @param [Integer] offset point in buffer to start from
+ * @param [Integer] length string's length in bytes. If nil, a (memory size - offset) length string is returned).
  * @return [String]
  * @raise {IndexError} if +length+ is too great
  * @raise {NullPointerError} if memory not initialized
@@ -423,8 +435,8 @@ memory_get_string(int argc, VALUE* argv, VALUE self)
 /*
  * call-seq: memory.get_array_of_string(offset, count=nil)
  * Return an array of strings contained in memory.
- * @param [Numeric] offset point in memory to start from
- * @param [Numeric] count number of strings to get. If nil, return all strings
+ * @param [Integer] offset point in memory to start from
+ * @param [Integer] count number of strings to get. If nil, return all strings
  * @return [Array<String>]
  * @raise {IndexError} if +offset+ is too great
  * @raise {NullPointerError} if memory not initialized
@@ -442,7 +454,7 @@ memory_get_array_of_string(int argc, VALUE* argv, VALUE self)
     count = (countnum == Qnil ? 0 : NUM2INT(countnum));
     retVal = rb_ary_new2(count);
 
-    Data_Get_Struct(self, AbstractMemory, ptr);
+    TypedData_Get_Struct(self, AbstractMemory, &rbffi_abstract_memory_data_type, ptr);
     checkRead(ptr);
 
     if (countnum != Qnil) {
@@ -473,7 +485,7 @@ memory_get_array_of_string(int argc, VALUE* argv, VALUE self)
  * call-seq: memory.read_array_of_string(count=nil)
  * Return an array of strings contained in memory. Same as:
  *  memory.get_array_of_string(0, count)
- * @param [Numeric] count number of strings to get. If nil, return all strings
+ * @param [Integer] count number of strings to get. If nil, return all strings
  * @return [Array<String>]
  */
 static VALUE
@@ -493,7 +505,7 @@ memory_read_array_of_string(int argc, VALUE* argv, VALUE self)
 
 /*
  * call-seq: memory.put_string(offset, str)
- * @param [Numeric] offset
+ * @param [Integer] offset
  * @param [String] str
  * @return [self]
  * @raise {SecurityError} when writing unsafe string to memory
@@ -523,8 +535,8 @@ memory_put_string(VALUE self, VALUE offset, VALUE str)
 /*
  * call-seq: memory.get_bytes(offset, length)
  * Return string contained in memory.
- * @param [Numeric] offset point in buffer to start from
- * @param [Numeric] length string's length in bytes.
+ * @param [Integer] offset point in buffer to start from
+ * @param [Integer] length string's length in bytes.
  * @return [String]
  * @raise {IndexError} if +length+ is too great
  * @raise {NullPointerError} if memory not initialized
@@ -547,10 +559,10 @@ memory_get_bytes(VALUE self, VALUE offset, VALUE length)
 /*
  * call-seq: memory.put_bytes(offset, str, index=0, length=nil)
  * Put a string in memory.
- * @param [Numeric] offset point in buffer to start from
+ * @param [Integer] offset point in buffer to start from
  * @param [String] str string to put to memory
- * @param [Numeric] index
- * @param [Numeric] length string's length in bytes. If nil, a (memory size - offset) length string is returned).
+ * @param [Integer] index
+ * @param [Integer] length string's length in bytes. If nil, a (memory size - offset) length string is returned).
  * @return [self]
  * @raise {IndexError} if +length+ is too great
  * @raise {NullPointerError} if memory not initialized
@@ -589,7 +601,7 @@ memory_put_bytes(int argc, VALUE* argv, VALUE self)
 
 /*
  * call-seq: memory.read_bytes(length)
- * @param [Numeric] length of string to return
+ * @param [Integer] length of string to return
  * @return [String]
  * equivalent to :
  *  memory.get_bytes(0, length)
@@ -603,8 +615,8 @@ memory_read_bytes(VALUE self, VALUE length)
 /*
  * call-seq: memory.write_bytes(str, index=0, length=nil)
  * @param [String] str string to put to memory
- * @param [Numeric] index
- * @param [Numeric] length string's length in bytes. If nil, a (memory size - offset) length string is returned).
+ * @param [Integer] index
+ * @param [Integer] length string's length in bytes. If nil, a (memory size - offset) length string is returned).
  * @return [self]
  * equivalent to :
  *  memory.put_bytes(0, str, index, length)
@@ -625,7 +637,7 @@ memory_write_bytes(int argc, VALUE* argv, VALUE self)
 
 /*
  * call-seq: memory.type_size
- * @return [Numeric] type size in bytes
+ * @return [Integer] type size in bytes
  * Get the memory's type size.
  */
 static VALUE
@@ -633,7 +645,7 @@ memory_type_size(VALUE self)
 {
     AbstractMemory* ptr;
 
-    Data_Get_Struct(self, AbstractMemory, ptr);
+    TypedData_Get_Struct(self, AbstractMemory, &rbffi_abstract_memory_data_type, ptr);
 
     return INT2NUM(ptr->typeSize);
 }
@@ -641,7 +653,7 @@ memory_type_size(VALUE self)
 /*
  * Document-method: []
  * call-seq: memory[idx]
- * @param [Numeric] idx index to access in memory
+ * @param [Integer] idx index to access in memory
  * @return
  * Memory read accessor.
  */
@@ -651,7 +663,7 @@ memory_aref(VALUE self, VALUE idx)
     AbstractMemory* ptr;
     VALUE rbOffset = Qnil;
 
-    Data_Get_Struct(self, AbstractMemory, ptr);
+    TypedData_Get_Struct(self, AbstractMemory, &rbffi_abstract_memory_data_type, ptr);
 
     rbOffset = ULONG2NUM(NUM2ULONG(idx) * ptr->typeSize);
 
@@ -661,7 +673,9 @@ memory_aref(VALUE self, VALUE idx)
 static inline char*
 memory_address(VALUE obj)
 {
-    return ((AbstractMemory *) DATA_PTR(obj))->address;
+    AbstractMemory *mem;
+    TypedData_Get_Struct(obj, AbstractMemory, &rbffi_abstract_memory_data_type, mem);
+    return mem->address;
 }
 
 static VALUE
@@ -669,24 +683,33 @@ memory_copy_from(VALUE self, VALUE rbsrc, VALUE rblen)
 {
     AbstractMemory* dst;
 
-    Data_Get_Struct(self, AbstractMemory, dst);
+    TypedData_Get_Struct(self, AbstractMemory, &rbffi_abstract_memory_data_type, dst);
 
-    memcpy(dst->address, rbffi_AbstractMemory_Cast(rbsrc, rbffi_AbstractMemoryClass)->address, NUM2INT(rblen));
+    memcpy(dst->address, rbffi_AbstractMemory_Cast(rbsrc, &rbffi_abstract_memory_data_type)->address, NUM2INT(rblen));
 
     return self;
 }
 
-AbstractMemory*
-rbffi_AbstractMemory_Cast(VALUE obj, VALUE klass)
+/*
+ * call-seq:
+ *    res.freeze
+ *
+ * Freeze the AbstractMemory object and unset the writable flag.
+ */
+static VALUE
+memory_freeze(VALUE self)
 {
-    if (rb_obj_is_kind_of(obj, klass)) {
-        AbstractMemory* memory;
-        Data_Get_Struct(obj, AbstractMemory, memory);
-        return memory;
-    }
+    AbstractMemory* ptr = MEMORY(self);
+    ptr->flags &= ~MEM_WR;
+    return rb_call_super(0, NULL);
+}
 
-    rb_raise(rb_eArgError, "Invalid Memory object");
-    return NULL;
+AbstractMemory*
+rbffi_AbstractMemory_Cast(VALUE obj, const rb_data_type_t *data_type)
+{
+    AbstractMemory* memory;
+    TypedData_Get_Struct(obj, AbstractMemory, data_type, memory);
+    return memory;
 }
 
 void
@@ -781,7 +804,7 @@ rbffi_AbstractMemory_Init(VALUE moduleFFI)
      * Document-variable: FFI::AbstractMemory
      */
     rb_global_variable(&rbffi_AbstractMemoryClass);
-    rb_define_alloc_func(classMemory, memory_allocate);
+    rb_undef_alloc_func(classMemory);
 
     NullPointerErrorClass = rb_define_class_under(moduleFFI, "NullPointerError", rb_eRuntimeError);
     /* Document-variable: NullPointerError */
@@ -838,8 +861,8 @@ rbffi_AbstractMemory_Init(VALUE moduleFFI)
 
     /*
      * Document-method: put_float32
-     * call-seq: memory.put_float32offset, value)
-     * @param [Numeric] offset
+     * call-seq: memory.put_float32(offset, value)
+     * @param [Integer] offset
      * @param [Numeric] value
      * @return [self]
      * Put +value+ as a 32-bit float in memory at offset +offset+ (alias: #put_float).
@@ -848,7 +871,7 @@ rbffi_AbstractMemory_Init(VALUE moduleFFI)
     /*
      * Document-method: get_float32
      * call-seq: memory.get_float32(offset)
-     * @param [Numeric] offset
+     * @param [Integer] offset
      * @return [Float]
      * Get a 32-bit float from memory at offset +offset+ (alias: #get_float).
      */
@@ -879,7 +902,7 @@ rbffi_AbstractMemory_Init(VALUE moduleFFI)
     /*
      * Document-method: put_array_of_float32
      * call-seq: memory.put_array_of_float32(offset, ary)
-     * @param [Numeric] offset
+     * @param [Integer] offset
      * @param [Array<Numeric>] ary
      * @return [self]
      * Put values from +ary+ as 32-bit floats in memory from offset +offset+ (alias: #put_array_of_float).
@@ -888,8 +911,8 @@ rbffi_AbstractMemory_Init(VALUE moduleFFI)
     /*
      * Document-method: get_array_of_float32
      * call-seq: memory.get_array_of_float32(offset, length)
-     * @param [Numeric] offset
-     * @param [Numeric] length number of Float to get
+     * @param [Integer] offset
+     * @param [Integer] length number of Float to get
      * @return [Array<Float>]
      * Get 32-bit floats in memory from offset +offset+ (alias: #get_array_of_float).
      */
@@ -908,7 +931,7 @@ rbffi_AbstractMemory_Init(VALUE moduleFFI)
     /*
      * Document-method: read_array_of_float
      * call-seq: memory.read_array_of_float(length)
-     * @param [Numeric] length number of Float to read
+     * @param [Integer] length number of Float to read
      * @return [Array<Float>]
      * Read 32-bit floats from memory.
      *
@@ -921,7 +944,7 @@ rbffi_AbstractMemory_Init(VALUE moduleFFI)
     /*
      * Document-method: put_float64
      * call-seq: memory.put_float64(offset, value)
-     * @param [Numeric] offset
+     * @param [Integer] offset
      * @param [Numeric] value
      * @return [self]
      * Put +value+ as a 64-bit float (double) in memory at offset +offset+ (alias: #put_double).
@@ -930,7 +953,7 @@ rbffi_AbstractMemory_Init(VALUE moduleFFI)
     /*
      * Document-method: get_float64
      * call-seq: memory.get_float64(offset)
-     * @param [Numeric] offset
+     * @param [Integer] offset
      * @return [Float]
      * Get a 64-bit float (double) from memory at offset +offset+ (alias: #get_double).
      */
@@ -961,7 +984,7 @@ rbffi_AbstractMemory_Init(VALUE moduleFFI)
     /*
      * Document-method: put_array_of_float64
      * call-seq: memory.put_array_of_float64(offset, ary)
-     * @param [Numeric] offset
+     * @param [Integer] offset
      * @param [Array<Numeric>] ary
      * @return [self]
      * Put values from +ary+ as 64-bit floats (doubles) in memory from offset +offset+ (alias: #put_array_of_double).
@@ -970,8 +993,8 @@ rbffi_AbstractMemory_Init(VALUE moduleFFI)
     /*
      * Document-method: get_array_of_float64
      * call-seq: memory.get_array_of_float64(offset, length)
-     * @param [Numeric] offset
-     * @param [Numeric] length number of Float to get
+     * @param [Integer] offset
+     * @param [Integer] length number of Float to get
      * @return [Array<Float>]
      * Get 64-bit floats (doubles) in memory from offset +offset+ (alias: #get_array_of_double).
      */
@@ -990,7 +1013,7 @@ rbffi_AbstractMemory_Init(VALUE moduleFFI)
     /*
      * Document-method: read_array_of_double
      * call-seq: memory.read_array_of_double(length)
-     * @param [Numeric] length number of Float to read
+     * @param [Integer] length number of Float to read
      * @return [Array<Float>]
      * Read 64-bit floats (doubles) from memory.
      *
@@ -1003,7 +1026,7 @@ rbffi_AbstractMemory_Init(VALUE moduleFFI)
     /*
      * Document-method: put_pointer
      * call-seq: memory.put_pointer(offset, value)
-     * @param [Numeric] offset
+     * @param [Integer] offset
      * @param [nil,Pointer, Integer, #to_ptr] value
      * @return [self]
      * Put +value+ in memory from +offset+..
@@ -1012,7 +1035,7 @@ rbffi_AbstractMemory_Init(VALUE moduleFFI)
     /*
      * Document-method: get_pointer
      * call-seq: memory.get_pointer(offset)
-     * @param [Numeric] offset
+     * @param [Integer] offset
      * @return [Pointer]
      * Get a {Pointer} to the memory from +offset+.
      */
@@ -1041,7 +1064,7 @@ rbffi_AbstractMemory_Init(VALUE moduleFFI)
     /*
      * Document-method: put_array_of_pointer
      * call-seq: memory.put_array_of_pointer(offset, ary)
-     * @param [Numeric] offset
+     * @param [Integer] offset
      * @param [Array<#to_ptr>] ary
      * @return [self]
      * Put an array of {Pointer} into memory from +offset+.
@@ -1050,8 +1073,8 @@ rbffi_AbstractMemory_Init(VALUE moduleFFI)
     /*
      * Document-method: get_array_of_pointer
      * call-seq: memory.get_array_of_pointer(offset, length)
-     * @param [Numeric] offset
-     * @param [Numeric] length
+     * @param [Integer] offset
+     * @param [Integer] length
      * @return [Array<Pointer>]
      * Get an array of {Pointer} of length +length+ from +offset+.
      */
@@ -1070,7 +1093,7 @@ rbffi_AbstractMemory_Init(VALUE moduleFFI)
     /*
      * Document-method: read_array_of_pointer
      * call-seq: memory.read_array_of_pointer(length)
-     * @param [Numeric] length
+     * @param [Integer] length
      * @return [Array<Pointer>]
      * Read an array of {Pointer} of length +length+.
      *
@@ -1086,6 +1109,7 @@ rbffi_AbstractMemory_Init(VALUE moduleFFI)
     rb_define_method(classMemory, "read_bytes", memory_read_bytes, 1);
     rb_define_method(classMemory, "write_bytes", memory_write_bytes, -1);
     rb_define_method(classMemory, "get_array_of_string", memory_get_array_of_string, -1);
+    rb_define_method(classMemory, "read_array_of_string", memory_read_array_of_string, -1);
 
     rb_define_method(classMemory, "get", memory_get, 2);
     rb_define_method(classMemory, "put", memory_put, 3);
@@ -1096,6 +1120,7 @@ rbffi_AbstractMemory_Init(VALUE moduleFFI)
     rb_define_method(classMemory, "type_size", memory_type_size, 0);
     rb_define_method(classMemory, "[]", memory_aref, 1);
     rb_define_method(classMemory, "__copy_from__", memory_copy_from, 2);
+    rb_define_method(classMemory, "freeze", memory_freeze, 0 );
 
     id_to_ptr = rb_intern("to_ptr");
     id_call = rb_intern("call");

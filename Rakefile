@@ -1,7 +1,7 @@
 require 'rbconfig'
 require 'date'
 require 'fileutils'
-require 'rbconfig'
+require 'yaml'
 require 'rspec/core/rake_task'
 require 'rubygems/package_task'
 require 'rake/extensiontask'
@@ -13,12 +13,12 @@ BUILD_EXT_DIR = File.join(BUILD_DIR, "#{RbConfig::CONFIG['arch']}", 'ffi_c', RUB
 
 gem_spec = Bundler.load_gemspec('ffi.gemspec')
 
-RSpec::Core::RakeTask.new(:spec => :compile) do |config|
+RSpec::Core::RakeTask.new(:spec) do |config|
   config.rspec_opts = YAML.load_file 'spec/spec.opts'
 end
 
 desc "Build all packages"
-task :package => %w[ gem:java gem:windows ]
+task :package => %w[ gem:java gem:native ]
 
 CLOBBER.include 'lib/ffi/types.conf'
 CLOBBER.include 'pkg'
@@ -30,9 +30,8 @@ CLEAN.include 'spec/ffi/fixtures/libtest.{dylib,so,dll}'
 CLEAN.include 'spec/ffi/fixtures/*.o'
 CLEAN.include 'spec/ffi/embed-test/ext/*.{o,def}'
 CLEAN.include 'spec/ffi/embed-test/ext/Makefile'
-CLEAN.include "pkg/ffi-*-{mingw32,java}"
-CLEAN.include 'lib/1.*'
-CLEAN.include 'lib/2.*'
+CLEAN.include "pkg/ffi-*-*/"
+CLEAN.include 'lib/{2,3}.*'
 
 # clean all shipped files, that are not in git
 CLEAN.include(
@@ -85,8 +84,22 @@ end
 task 'gem:java' => 'java:gem'
 
 FfiGemHelper.install_tasks
-# Register windows gems to be pushed to rubygems.org
-Bundler::GemHelper.instance.cross_platforms = %w[x86-mingw32 x64-mingw32]
+# Register binary gems to be pushed to rubygems.org
+Bundler::GemHelper.instance.cross_platforms = %w[
+  x86-mingw32
+  x64-mingw-ucrt
+  x64-mingw32
+  x86-linux-gnu
+  x86-linux-musl
+  x86_64-linux-gnu
+  x86_64-linux-musl
+  arm-linux-gnu
+  arm-linux-musl
+  aarch64-linux-gnu
+  aarch64-linux-musl
+  x86_64-darwin
+  arm64-darwin
+]
 
 if RUBY_ENGINE == 'ruby' || RUBY_ENGINE == 'rbx'
   require 'rake/extensiontask'
@@ -99,6 +112,8 @@ if RUBY_ENGINE == 'ruby' || RUBY_ENGINE == 'rbx'
     ext.cross_compiling do |spec|
       spec.files.reject! { |path| File.fnmatch?('ext/*', path) }
     end
+    # Enable debug info for 'rake compile' but not for 'gem install'
+    ext.config_options << "--enable-debug"
 
   end
 else
@@ -108,11 +123,25 @@ else
 end
 
 
-desc "build a windows gem without all the ceremony"
-task "gem:windows" do
-  require "rake_compiler_dock"
-  sh "bundle package"
-  RakeCompilerDock.sh "sudo apt-get update && sudo apt-get install -y libltdl-dev && bundle --local && rake cross native gem MAKE='nice make -j`nproc`' RUBY_CC_VERSION=${RUBY_CC_VERSION/:2.2.2/}"
+namespace "gem" do
+  task 'prepare' do
+    require 'rake_compiler_dock'
+    sh "bundle package --all"
+  end
+
+  Bundler::GemHelper.instance.cross_platforms.each do |plat|
+    desc "Build all native binary gems in parallel"
+    multitask 'native' => plat
+
+    desc "Build the native gem for #{plat}"
+    task plat => ['prepare', 'build'] do
+      RakeCompilerDock.sh <<-EOT, platform: plat
+        #{ "sudo apt-get update && sudo apt-get install -y libltdl-dev &&" if plat !~ /linux/ }
+        bundle --local &&
+        rake native:#{plat} pkg/#{gem_spec.full_name}-#{plat}.gem MAKE='nice make -j`nproc`' RUBY_CC_VERSION=${RUBY_CC_VERSION/:2.4.0/}
+      EOT
+    end
+  end
 end
 
 directory "ext/ffi_c/libffi"

@@ -49,20 +49,36 @@
 
 static VALUE sbv_allocate(VALUE);
 static VALUE sbv_initialize(VALUE, VALUE);
-static void sbv_mark(StructByValue *);
-static void sbv_free(StructByValue *);
+static void sbv_mark(void *);
+static void sbv_compact(void *);
+static void sbv_free(void *);
+static size_t sbv_memsize(const void *);
 
 VALUE rbffi_StructByValueClass = Qnil;
+
+static const rb_data_type_t sbv_type_data_type = {
+  .wrap_struct_name = "FFI::StructByValue",
+  .function = {
+      .dmark = sbv_mark,
+      .dfree = sbv_free,
+      .dsize = sbv_memsize,
+      ffi_compact_callback( sbv_compact )
+  },
+  .parent = &rbffi_type_data_type,
+  // IMPORTANT: WB_PROTECTED objects must only use the RB_OBJ_WRITE()
+  // macro to update VALUE references, as to trigger write barriers.
+  .flags = RUBY_TYPED_FREE_IMMEDIATELY | RUBY_TYPED_WB_PROTECTED | FFI_RUBY_TYPED_FROZEN_SHAREABLE
+};
 
 static VALUE
 sbv_allocate(VALUE klass)
 {
     StructByValue* sbv;
 
-    VALUE obj = Data_Make_Struct(klass, StructByValue, sbv_mark, sbv_free, sbv);
+    VALUE obj = TypedData_Make_Struct(klass, StructByValue, &sbv_type_data_type, sbv);
 
-    sbv->rbStructClass = Qnil;
-    sbv->rbStructLayout = Qnil;
+    RB_OBJ_WRITE(obj, &sbv->rbStructClass, Qnil);
+    RB_OBJ_WRITE(obj, &sbv->rbStructLayout, Qnil);
     sbv->base.nativeType = NATIVE_STRUCT;
 
     sbv->base.ffiType = xcalloc(1, sizeof(*sbv->base.ffiType));
@@ -85,38 +101,54 @@ sbv_initialize(VALUE self, VALUE rbStructClass)
         rb_raise(rb_eTypeError, "wrong type in @layout ivar (expected FFI::StructLayout)");
     }
 
-    Data_Get_Struct(rbLayout, StructLayout, layout);
-    Data_Get_Struct(self, StructByValue, sbv);
-    sbv->rbStructClass = rbStructClass;
-    sbv->rbStructLayout = rbLayout;
+    TypedData_Get_Struct(rbLayout, StructLayout, &rbffi_struct_layout_data_type, layout);
+    TypedData_Get_Struct(self, StructByValue, &sbv_type_data_type, sbv);
+    RB_OBJ_WRITE(self, &sbv->rbStructClass, rbStructClass);
+    RB_OBJ_WRITE(self, &sbv->rbStructLayout, rbLayout);
 
     /* We can just use everything from the ffi_type directly */
     *sbv->base.ffiType = *layout->base.ffiType;
-    
+
     return self;
 }
 
 static void
-sbv_mark(StructByValue *sbv)
+sbv_mark(void *data)
 {
-    rb_gc_mark(sbv->rbStructClass);
-    rb_gc_mark(sbv->rbStructLayout);
+    StructByValue *sbv = (StructByValue *)data;
+    rb_gc_mark_movable(sbv->rbStructClass);
+    rb_gc_mark_movable(sbv->rbStructLayout);
 }
 
 static void
-sbv_free(StructByValue *sbv)
+sbv_compact(void *data)
 {
+    StructByValue *sbv = (StructByValue *)data;
+    ffi_gc_location(sbv->rbStructClass);
+    ffi_gc_location(sbv->rbStructLayout);
+}
+
+static void
+sbv_free(void *data)
+{
+    StructByValue *sbv = (StructByValue *)data;
     xfree(sbv->base.ffiType);
     xfree(sbv);
 }
 
+static size_t
+sbv_memsize(const void *data)
+{
+    const StructByValue *sbv = (const StructByValue *)data;
+    return sizeof(StructByValue) + sizeof(*sbv->base.ffiType);
+}
 
 static VALUE
 sbv_layout(VALUE self)
 {
     StructByValue* sbv;
 
-    Data_Get_Struct(self, StructByValue, sbv);
+    TypedData_Get_Struct(self, StructByValue, &sbv_type_data_type, sbv);
     return sbv->rbStructLayout;
 }
 
@@ -125,7 +157,7 @@ sbv_struct_class(VALUE self)
 {
     StructByValue* sbv;
 
-    Data_Get_Struct(self, StructByValue, sbv);
+    TypedData_Get_Struct(self, StructByValue, &sbv_type_data_type, sbv);
 
     return sbv->rbStructClass;
 }

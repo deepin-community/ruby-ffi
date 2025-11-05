@@ -36,6 +36,9 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <ruby.h>
+#if HAVE_RB_EXT_RACTOR_SAFE
+#include <ruby/ractor.h>
+#endif
 
 #include <ffi.h>
 #include "rbffi.h"
@@ -62,35 +65,65 @@ typedef struct VariadicInvoker_ {
     bool blocking;
 } VariadicInvoker;
 
-
 static VALUE variadic_allocate(VALUE klass);
 static VALUE variadic_initialize(VALUE self, VALUE rbFunction, VALUE rbParameterTypes,
         VALUE rbReturnType, VALUE options);
-static void variadic_mark(VariadicInvoker *);
+static void variadic_mark(void *);
+static void variadic_compact(void *);
+static size_t variadic_memsize(const void *);
 
 static VALUE classVariadicInvoker = Qnil;
+
+static const rb_data_type_t variadic_data_type = {
+  .wrap_struct_name = "FFI::VariadicInvoker",
+  .function = {
+      .dmark = variadic_mark,
+      .dfree = RUBY_TYPED_DEFAULT_FREE,
+      .dsize = variadic_memsize,
+      ffi_compact_callback( variadic_compact )
+  },
+  // IMPORTANT: WB_PROTECTED objects must only use the RB_OBJ_WRITE()
+  // macro to update VALUE references, as to trigger write barriers.
+  .flags = RUBY_TYPED_FREE_IMMEDIATELY | RUBY_TYPED_WB_PROTECTED | FFI_RUBY_TYPED_FROZEN_SHAREABLE
+};
 
 
 static VALUE
 variadic_allocate(VALUE klass)
 {
     VariadicInvoker *invoker;
-    VALUE obj = Data_Make_Struct(klass, VariadicInvoker, variadic_mark, -1, invoker);
+    VALUE obj = TypedData_Make_Struct(klass, VariadicInvoker, &variadic_data_type, invoker);
 
-    invoker->rbAddress = Qnil;
-    invoker->rbEnums = Qnil;
-    invoker->rbReturnType = Qnil;
+    RB_OBJ_WRITE(obj, &invoker->rbAddress, Qnil);
+    RB_OBJ_WRITE(obj, &invoker->rbEnums, Qnil);
+    RB_OBJ_WRITE(obj, &invoker->rbReturnType, Qnil);
     invoker->blocking = false;
 
     return obj;
 }
 
 static void
-variadic_mark(VariadicInvoker *invoker)
+variadic_mark(void *data)
 {
-    rb_gc_mark(invoker->rbEnums);
-    rb_gc_mark(invoker->rbAddress);
-    rb_gc_mark(invoker->rbReturnType);
+    VariadicInvoker *invoker = (VariadicInvoker *)data;
+    rb_gc_mark_movable(invoker->rbEnums);
+    rb_gc_mark_movable(invoker->rbAddress);
+    rb_gc_mark_movable(invoker->rbReturnType);
+}
+
+static void
+variadic_compact(void *data)
+{
+    VariadicInvoker *invoker = (VariadicInvoker *)data;
+    ffi_gc_location(invoker->rbEnums);
+    ffi_gc_location(invoker->rbAddress);
+    ffi_gc_location(invoker->rbReturnType);
+}
+
+static size_t
+variadic_memsize(const void *data)
+{
+    return sizeof(VariadicInvoker);
 }
 
 static VALUE
@@ -108,10 +141,10 @@ variadic_initialize(VALUE self, VALUE rbFunction, VALUE rbParameterTypes, VALUE 
     Check_Type(options, T_HASH);
     convention = rb_hash_aref(options, ID2SYM(rb_intern("convention")));
 
-    Data_Get_Struct(self, VariadicInvoker, invoker);
-    invoker->rbEnums = rb_hash_aref(options, ID2SYM(rb_intern("enums")));
-    invoker->rbAddress = rbFunction;
-    invoker->function = rbffi_AbstractMemory_Cast(rbFunction, rbffi_PointerClass)->address;
+    TypedData_Get_Struct(self, VariadicInvoker, &variadic_data_type, invoker);
+    RB_OBJ_WRITE(self, &invoker->rbEnums, rb_hash_aref(options, ID2SYM(rb_intern("enums"))));
+    RB_OBJ_WRITE(self, &invoker->rbAddress, rbFunction);
+    invoker->function = rbffi_AbstractMemory_Cast(rbFunction, &rbffi_pointer_data_type)->address;
     invoker->blocking = RTEST(rb_hash_aref(options, ID2SYM(rb_intern("blocking"))));
 
 #if defined(X86_WIN32)
@@ -122,13 +155,13 @@ variadic_initialize(VALUE self, VALUE rbFunction, VALUE rbParameterTypes, VALUE 
     invoker->abi = FFI_DEFAULT_ABI;
 #endif
 
-    invoker->rbReturnType = rbffi_Type_Lookup(rbReturnType);
+    RB_OBJ_WRITE(self, &invoker->rbReturnType, rbffi_Type_Lookup(rbReturnType));
     if (!RTEST(invoker->rbReturnType)) {
         VALUE typeName = rb_funcall2(rbReturnType, rb_intern("inspect"), 0, NULL);
         rb_raise(rb_eTypeError, "Invalid return type (%s)", RSTRING_PTR(typeName));
     }
 
-    Data_Get_Struct(rbReturnType, Type, invoker->returnType);
+    TypedData_Get_Struct(rbReturnType, Type, &rbffi_type_data_type, invoker->returnType);
 
     invoker->paramCount = -1;
 
@@ -142,7 +175,7 @@ variadic_initialize(VALUE self, VALUE rbFunction, VALUE rbParameterTypes, VALUE 
             VALUE typeName = rb_funcall2(entry, rb_intern("inspect"), 0, NULL);
             rb_raise(rb_eTypeError, "Invalid parameter type (%s)", RSTRING_PTR(typeName));
         }
-        Data_Get_Struct(rbType, Type, type);
+        TypedData_Get_Struct(rbType, Type, &rbffi_type_data_type, type);
         if (type->nativeType != NATIVE_VARARGS) {
             rb_ary_push(fixed, entry);
         }
@@ -150,7 +183,7 @@ variadic_initialize(VALUE self, VALUE rbFunction, VALUE rbParameterTypes, VALUE 
     /*
      * @fixed and @type_map are used by the parameter mangling ruby code
      */
-    rb_iv_set(self, "@fixed", fixed);
+    rb_iv_set(self, "@fixed", rb_obj_freeze(fixed));
     rb_iv_set(self, "@type_map", rb_hash_aref(options, ID2SYM(rb_intern("type_map"))));
 
     return retval;
@@ -169,6 +202,7 @@ variadic_invoke(VALUE self, VALUE parameterTypes, VALUE parameterValues)
     Type** paramTypes;
     VALUE* argv;
     VALUE* callbackParameters;
+    VALUE callbackProc;
     int paramCount = 0, fixedCount = 0, callbackCount = 0, i;
     ffi_status ffiStatus;
     rbffi_frame_t frame = { 0 };
@@ -176,8 +210,8 @@ variadic_invoke(VALUE self, VALUE parameterTypes, VALUE parameterValues)
     Check_Type(parameterTypes, T_ARRAY);
     Check_Type(parameterValues, T_ARRAY);
 
-    Data_Get_Struct(self, VariadicInvoker, invoker);
-    paramCount = (int) RARRAY_LEN(parameterTypes);
+    TypedData_Get_Struct(self, VariadicInvoker, &variadic_data_type, invoker);
+    paramCount = RARRAY_LENINT(parameterTypes);
     paramTypes = ALLOCA_N(Type *, paramCount);
     ffiParamTypes = ALLOCA_N(ffi_type *, paramCount);
     params = ALLOCA_N(FFIStorage, paramCount);
@@ -192,25 +226,25 @@ variadic_invoke(VALUE self, VALUE parameterTypes, VALUE parameterValues)
         if (!rb_obj_is_kind_of(rbType, rbffi_TypeClass)) {
             rb_raise(rb_eTypeError, "wrong type.  Expected (FFI::Type)");
         }
-        Data_Get_Struct(rbType, Type, paramTypes[i]);
+        TypedData_Get_Struct(rbType, Type, &rbffi_type_data_type, paramTypes[i]);
 
         switch (paramTypes[i]->nativeType) {
             case NATIVE_INT8:
             case NATIVE_INT16:
             case NATIVE_INT32:
                 rbType = rb_const_get(rbffi_TypeClass, rb_intern("INT32"));
-                Data_Get_Struct(rbType, Type, paramTypes[i]);
+                TypedData_Get_Struct(rbType, Type, &rbffi_type_data_type, paramTypes[i]);
                 break;
             case NATIVE_UINT8:
             case NATIVE_UINT16:
             case NATIVE_UINT32:
                 rbType = rb_const_get(rbffi_TypeClass, rb_intern("UINT32"));
-                Data_Get_Struct(rbType, Type, paramTypes[i]);
+                TypedData_Get_Struct(rbType, Type, &rbffi_type_data_type, paramTypes[i]);
                 break;
 
             case NATIVE_FLOAT32:
                 rbType = rb_const_get(rbffi_TypeClass, rb_intern("DOUBLE"));
-                Data_Get_Struct(rbType, Type, paramTypes[i]);
+                TypedData_Get_Struct(rbType, Type, &rbffi_type_data_type, paramTypes[i]);
                 break;
 
             case NATIVE_FUNCTION:
@@ -257,8 +291,9 @@ variadic_invoke(VALUE self, VALUE parameterTypes, VALUE parameterValues)
             rb_raise(rb_eArgError, "Unknown FFI error");
     }
 
-    rbffi_SetupCallParams(paramCount, argv, -1, paramTypes, params,
-        ffiValues, callbackParameters, callbackCount, invoker->rbEnums);
+    callbackProc = rbffi_SetupCallParams(paramCount, argv, -1, paramTypes, params,
+        ffiValues, callbackParameters, callbackCount,
+        invoker->rbEnums);
 
     rbffi_frame_push(&frame);
 
@@ -276,6 +311,7 @@ variadic_invoke(VALUE self, VALUE parameterTypes, VALUE parameterValues)
     } else {
         ffi_call(&cif, FFI_FN(invoker->function), retval, ffiValues);
     }
+    RB_GC_GUARD(callbackProc);
 
     rbffi_frame_pop(&frame);
 
@@ -288,6 +324,14 @@ variadic_invoke(VALUE self, VALUE parameterTypes, VALUE parameterValues)
     return rbffi_NativeValue_ToRuby(invoker->returnType, invoker->rbReturnType, retval);
 }
 
+static VALUE
+variadic_return_type(VALUE self)
+{
+    VariadicInvoker* invoker;
+
+    TypedData_Get_Struct(self, VariadicInvoker, &variadic_data_type, invoker);
+    return invoker->rbReturnType;
+}
 
 void
 rbffi_Variadic_Init(VALUE moduleFFI)
@@ -299,5 +343,6 @@ rbffi_Variadic_Init(VALUE moduleFFI)
 
     rb_define_method(classVariadicInvoker, "initialize", variadic_initialize, 4);
     rb_define_method(classVariadicInvoker, "invoke", variadic_invoke, 2);
+    rb_define_method(classVariadicInvoker, "return_type", variadic_return_type, 0);
 }
 

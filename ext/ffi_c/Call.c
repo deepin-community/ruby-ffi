@@ -71,7 +71,7 @@
 #define FLOAT32_ADJ (4)
 #define FLOAT64_ADJ (8)
 #define ADDRESS_ADJ (sizeof(void *))
-#define LONGDOUBLE_ADJ (ffi_type_longdouble.alignment)
+#define LONGDOUBLE_ADJ (ffi_type_longdouble.alignment > sizeof(long double) ? ffi_type_longdouble.alignment : sizeof(long double))
 
 #endif /* USE_RAW */
 
@@ -86,10 +86,11 @@ static inline void* getPointer(VALUE value, int type);
 
 static ID id_to_ptr, id_map_symbol, id_to_native;
 
-void
+VALUE
 rbffi_SetupCallParams(int argc, VALUE* argv, int paramCount, Type** paramTypes,
         FFIStorage* paramStorage, void** ffiValues,
-        VALUE* callbackParameters, int callbackCount, VALUE enums)
+        VALUE* callbackParameters, int callbackCount,
+        VALUE enums)
 {
     VALUE callbackProc = Qnil;
     FFIStorage* param = &paramStorage[0];
@@ -327,6 +328,7 @@ rbffi_SetupCallParams(int argc, VALUE* argv, int paramCount, Type** paramTypes,
                 rb_raise(rb_eArgError, "Invalid parameter type: %d", paramType->nativeType);
         }
     }
+    return callbackProc;
 }
 
 static void *
@@ -362,6 +364,7 @@ rbffi_CallFunction(int argc, VALUE* argv, void* function, FunctionType* fnInfo)
     FFIStorage* params;
     VALUE rbReturnValue;
     rbffi_frame_t frame = { 0 };
+    VALUE callbackProc;
 
     retval = alloca(MAX(fnInfo->ffi_cif.rtype->size, FFI_SIZEOF_ARG));
 
@@ -379,9 +382,10 @@ rbffi_CallFunction(int argc, VALUE* argv, void* function, FunctionType* fnInfo)
         bc->params = params;
         bc->frame = &frame;
 
-        rbffi_SetupCallParams(argc, argv,
+        callbackProc = rbffi_SetupCallParams(argc, argv,
             fnInfo->parameterCount, fnInfo->parameterTypes, params, ffiValues,
-            fnInfo->callbackParameters, fnInfo->callbackCount, fnInfo->rbEnums);
+            fnInfo->callbackParameters, fnInfo->callbackCount,
+            fnInfo->rbEnums);
 
         rbffi_frame_push(&frame);
         rb_rescue2(rbffi_do_blocking_call, (VALUE) bc, rbffi_save_frame_exception, (VALUE) &frame, rb_eException, (VALUE) 0);
@@ -392,14 +396,16 @@ rbffi_CallFunction(int argc, VALUE* argv, void* function, FunctionType* fnInfo)
         ffiValues = ALLOCA_N(void *, fnInfo->parameterCount);
         params = ALLOCA_N(FFIStorage, fnInfo->parameterCount);
 
-        rbffi_SetupCallParams(argc, argv,
+        callbackProc = rbffi_SetupCallParams(argc, argv,
             fnInfo->parameterCount, fnInfo->parameterTypes, params, ffiValues,
-            fnInfo->callbackParameters, fnInfo->callbackCount, fnInfo->rbEnums);
+            fnInfo->callbackParameters, fnInfo->callbackCount,
+            fnInfo->rbEnums);
 
         rbffi_frame_push(&frame);
         ffi_call(&fnInfo->ffi_cif, FFI_FN(function), retval, ffiValues);
         rbffi_frame_pop(&frame);
     }
+    RB_GC_GUARD(callbackProc);
 
     if (unlikely(!fnInfo->ignoreErrno)) {
         rbffi_save_errno();
@@ -420,11 +426,17 @@ getPointer(VALUE value, int type)
 {
     if (likely(type == T_DATA && rb_obj_is_kind_of(value, rbffi_AbstractMemoryClass))) {
 
-        return ((AbstractMemory *) DATA_PTR(value))->address;
+        AbstractMemory *mem;
+        TypedData_Get_Struct(value, AbstractMemory, &rbffi_abstract_memory_data_type, mem);
+        return mem->address;
 
     } else if (type == T_DATA && rb_obj_is_kind_of(value, rbffi_StructClass)) {
 
-        AbstractMemory* memory = ((Struct *) DATA_PTR(value))->pointer;
+        Struct* s;
+        AbstractMemory* memory;
+
+        TypedData_Get_Struct(value, Struct, &rbffi_struct_data_type, s);
+        memory = s->pointer;
         return memory != NULL ? memory->address : NULL;
 
     } else if (type == T_STRING) {
@@ -439,7 +451,9 @@ getPointer(VALUE value, int type)
 
         VALUE ptr = rb_funcall2(value, id_to_ptr, 0, NULL);
         if (rb_obj_is_kind_of(ptr, rbffi_AbstractMemoryClass) && TYPE(ptr) == T_DATA) {
-            return ((AbstractMemory *) DATA_PTR(ptr))->address;
+            AbstractMemory *mem;
+            TypedData_Get_Struct(ptr, AbstractMemory, &rbffi_abstract_memory_data_type, mem);
+            return mem->address;
         }
         rb_raise(rb_eArgError, "to_ptr returned an invalid pointer");
     }
@@ -458,7 +472,9 @@ rbffi_GetInvoker(FunctionType *fnInfo)
 static void*
 callback_param(VALUE proc, VALUE cbInfo)
 {
-    VALUE callback ;
+    VALUE callback;
+    AbstractMemory *mem;
+
     if (unlikely(proc == Qnil)) {
         return NULL ;
     }
@@ -466,14 +482,15 @@ callback_param(VALUE proc, VALUE cbInfo)
     /* Handle Function pointers here */
     if (rb_obj_is_kind_of(proc, rbffi_FunctionClass)) {
         AbstractMemory* ptr;
-        Data_Get_Struct(proc, AbstractMemory, ptr);
+        TypedData_Get_Struct(proc, AbstractMemory, &rbffi_abstract_memory_data_type, ptr);
         return ptr->address;
     }
 
     callback = rbffi_Function_ForProc(cbInfo, proc);
     RB_GC_GUARD(callback);
 
-    return ((AbstractMemory *) DATA_PTR(callback))->address;
+    TypedData_Get_Struct(callback, AbstractMemory, &rbffi_abstract_memory_data_type, mem);
+    return mem->address;
 }
 
 

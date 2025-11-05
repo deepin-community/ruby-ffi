@@ -29,12 +29,30 @@
 
 #include <ruby.h>
 #include <ffi.h>
+#include "compat.h"
 #include "ArrayType.h"
 
 static VALUE array_type_s_allocate(VALUE klass);
 static VALUE array_type_initialize(VALUE self, VALUE rbComponentType, VALUE rbLength);
-static void array_type_mark(ArrayType *);
-static void array_type_free(ArrayType *);
+static void array_type_mark(void *);
+static void array_type_compact(void *);
+static void array_type_free(void *);
+static size_t array_type_memsize(const void *);
+
+const rb_data_type_t rbffi_array_type_data_type = { /* extern */
+  .wrap_struct_name = "FFI::ArrayType",
+  .function = {
+      .dmark = array_type_mark,
+      .dfree = array_type_free,
+      .dsize = array_type_memsize,
+      ffi_compact_callback( array_type_compact )
+  },
+  .parent = &rbffi_type_data_type,
+  // IMPORTANT: WB_PROTECTED objects must only use the RB_OBJ_WRITE()
+  // macro to update VALUE references, as to trigger write barriers.
+  .flags = RUBY_TYPED_FREE_IMMEDIATELY | RUBY_TYPED_WB_PROTECTED | FFI_RUBY_TYPED_FROZEN_SHAREABLE
+};
+
 
 VALUE rbffi_ArrayTypeClass = Qnil;
 
@@ -44,37 +62,55 @@ array_type_s_allocate(VALUE klass)
     ArrayType* array;
     VALUE obj;
 
-    obj = Data_Make_Struct(klass, ArrayType, array_type_mark, array_type_free, array);
+    obj = TypedData_Make_Struct(klass, ArrayType, &rbffi_array_type_data_type, array);
 
     array->base.nativeType = NATIVE_ARRAY;
     array->base.ffiType = xcalloc(1, sizeof(*array->base.ffiType));
     array->base.ffiType->type = FFI_TYPE_STRUCT;
     array->base.ffiType->size = 0;
     array->base.ffiType->alignment = 0;
-    array->rbComponentType = Qnil;
+    RB_OBJ_WRITE(obj, &array->rbComponentType, Qnil);
 
     return obj;
 }
 
 static void
-array_type_mark(ArrayType *array)
+array_type_mark(void *data)
 {
-    rb_gc_mark(array->rbComponentType);
+    ArrayType *array = (ArrayType *)data;
+    rb_gc_mark_movable(array->rbComponentType);
 }
 
 static void
-array_type_free(ArrayType *array)
+array_type_compact(void *data)
 {
+    ArrayType *array = (ArrayType *)data;
+    ffi_gc_location(array->rbComponentType);
+}
+
+static void
+array_type_free(void *data)
+{
+    ArrayType *array = (ArrayType *)data;
     xfree(array->base.ffiType);
     xfree(array->ffiTypes);
     xfree(array);
 }
 
+static size_t
+array_type_memsize(const void *data)
+{
+    const ArrayType *array = (const ArrayType *)data;
+    size_t memsize = sizeof(ArrayType);
+    memsize += array->length * sizeof(*array->ffiTypes);
+    memsize += sizeof(*array->base.ffiType);
+    return memsize;
+}
 
 /*
  * call-seq: initialize(component_type, length)
  * @param [Type] component_type
- * @param [Numeric] length
+ * @param [Integer] length
  * @return [self]
  * A new instance of ArrayType.
  */
@@ -84,12 +120,12 @@ array_type_initialize(VALUE self, VALUE rbComponentType, VALUE rbLength)
     ArrayType* array;
     int i;
 
-    Data_Get_Struct(self, ArrayType, array);
+    TypedData_Get_Struct(self, ArrayType, &rbffi_array_type_data_type, array);
 
     array->length = NUM2UINT(rbLength);
-    array->rbComponentType = rbComponentType;
-    Data_Get_Struct(rbComponentType, Type, array->componentType);
-    
+    RB_OBJ_WRITE(self, &array->rbComponentType, rbComponentType);
+    TypedData_Get_Struct(rbComponentType, Type, &rbffi_type_data_type, array->componentType);
+
     array->ffiTypes = xcalloc(array->length + 1, sizeof(*array->ffiTypes));
     array->base.ffiType->elements = array->ffiTypes;
     array->base.ffiType->size = array->componentType->ffiType->size * array->length;
@@ -104,7 +140,7 @@ array_type_initialize(VALUE self, VALUE rbComponentType, VALUE rbLength)
 
 /*
  * call-seq: length
- * @return [Numeric]
+ * @return [Integer]
  * Get array's length
  */
 static VALUE
@@ -112,7 +148,7 @@ array_type_length(VALUE self)
 {
     ArrayType* array;
 
-    Data_Get_Struct(self, ArrayType, array);
+    TypedData_Get_Struct(self, ArrayType, &rbffi_array_type_data_type, array);
 
     return UINT2NUM(array->length);
 }
@@ -127,7 +163,7 @@ array_type_element_type(VALUE self)
 {
     ArrayType* array;
 
-    Data_Get_Struct(self, ArrayType, array);
+    TypedData_Get_Struct(self, ArrayType, &rbffi_array_type_data_type, array);
 
     return array->rbComponentType;
 }

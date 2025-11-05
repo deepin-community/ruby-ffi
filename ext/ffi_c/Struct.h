@@ -42,6 +42,9 @@ extern "C" {
 
     extern void rbffi_Struct_Init(VALUE ffiModule);
     extern void rbffi_StructLayout_Init(VALUE ffiModule);
+    extern const rb_data_type_t rbffi_struct_layout_data_type;
+    extern const rb_data_type_t rbffi_struct_field_data_type;
+
     typedef struct StructField_ StructField;
     typedef struct StructLayout_ StructLayout;
     typedef struct Struct_ Struct;
@@ -55,9 +58,6 @@ extern "C" {
         bool referenceRequired;
         VALUE rbType;
         VALUE rbName;
-
-        VALUE (*get)(StructField* field, Struct* s);
-        void (*put)(StructField* field, Struct* s, VALUE value);
 
         MemoryOp* memoryOp;
     };
@@ -75,11 +75,12 @@ extern "C" {
         * This avoids full ruby hash lookups for repeated lookups.
         */
         #define FIELD_CACHE_LOOKUP(this, sym) ( &(this)->cache_row[((sym) >> 8) & 0xff] )
+        #define FIELD_CACHE_ROWS 0x100
 
         struct field_cache_entry {
           VALUE fieldName;
           StructField *field;
-        } cache_row[0x100];
+        } cache_row[FIELD_CACHE_ROWS];
 
         /** The number of reference tracking fields in this struct */
         int referenceFieldCount;
@@ -98,6 +99,8 @@ extern "C" {
         VALUE rbPointer;
     };
 
+    extern const rb_data_type_t rbffi_struct_data_type;
+    extern const rb_data_type_t rbffi_struct_field_data_type;
     extern VALUE rbffi_StructClass, rbffi_StructLayoutClass;
     extern VALUE rbffi_StructLayoutFieldClass, rbffi_StructLayoutFunctionFieldClass;
     extern VALUE rbffi_StructLayoutArrayFieldClass;

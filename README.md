@@ -1,4 +1,4 @@
-# Ruby-FFI https://github.com/ffi/ffi/wiki [![Build Status](https://travis-ci.com/ffi/ffi.svg?branch=master)](https://travis-ci.com/ffi/ffi) [![Build status Windows](https://ci.appveyor.com/api/projects/status/r8wxn1sd4s794gg1/branch/master?svg=true)](https://ci.appveyor.com/project/larskanis/ffi-aofqa/branch/master)
+# Ruby-FFI https://github.com/ffi/ffi/wiki
 
 ## Description
 
@@ -15,6 +15,7 @@ using Ruby-FFI](https://github.com/ffi/ffi/wiki/why-use-ffi).
 * C structs (also nested), enums and global variables
 * Callbacks from C to Ruby
 * Automatic garbage collection of native memory
+* Usable in Ractor: [How-to-use-FFI-in-Ruby-Ractors](https://github.com/ffi/ffi/wiki/Ractors)
 
 ## Synopsis
 
@@ -62,7 +63,7 @@ On JRuby and TruffleRuby, there are no requirements to install the FFI gem, and 
 From rubygems:
 
     [sudo] gem install ffi
-    
+
 From a Gemfile using git or GitHub
 
     gem 'ffi', github: 'ffi/ffi', submodules: true
@@ -113,7 +114,7 @@ The following people have submitted code, bug reports, or otherwise contributed 
 * Jurij Smakov <jurij@wooyd.org>
 * KISHIMOTO, Makoto <ksmakoto@dd.iij4u.or.jp>
 * Kim Burgestrand <kim@burgestrand.se>
-* Lars Kanis <kanis@comcard.de>
+* Lars Kanis <lars@greiz-reinsdorf.de>
 * Luc Heinrich <luc@honk-honk.com>
 * Luis Lavena <luislavena@gmail.com>
 * Matijs van Zuijlen <matijs@matijs.net>

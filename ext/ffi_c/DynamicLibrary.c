@@ -50,17 +50,45 @@
 
 typedef struct LibrarySymbol_ {
     Pointer base;
-    VALUE library;
     VALUE name;
 } LibrarySymbol;
 
-static VALUE library_initialize(VALUE self, VALUE libname, VALUE libflags);
-static void library_free(Library* lib);
 
+static VALUE library_initialize(VALUE self, VALUE libname, VALUE libflags);
+static void library_free(void *);
+static size_t library_memsize(const void *);
 
 static VALUE symbol_allocate(VALUE klass);
 static VALUE symbol_new(VALUE library, void* address, VALUE name);
-static void symbol_mark(LibrarySymbol* sym);
+static void symbol_mark(void *data);
+static void symbol_compact(void *data);
+static size_t symbol_memsize(const void *data);
+
+static const rb_data_type_t rbffi_library_data_type = {
+    .wrap_struct_name = "FFI::DynamicLibrary",
+    .function = {
+        .dmark = NULL,
+        .dfree = library_free,
+        .dsize = library_memsize,
+    },
+    // IMPORTANT: WB_PROTECTED objects must only use the RB_OBJ_WRITE()
+    // macro to update VALUE references, as to trigger write barriers.
+    .flags = RUBY_TYPED_FREE_IMMEDIATELY | RUBY_TYPED_WB_PROTECTED | FFI_RUBY_TYPED_FROZEN_SHAREABLE
+};
+
+static const rb_data_type_t library_symbol_data_type = {
+    .wrap_struct_name = "FFI::DynamicLibrary::Symbol",
+    .function = {
+        .dmark = symbol_mark,
+        .dfree = RUBY_TYPED_DEFAULT_FREE,
+        .dsize = symbol_memsize,
+        ffi_compact_callback( symbol_compact )
+    },
+    .parent = &rbffi_pointer_data_type,
+    // IMPORTANT: WB_PROTECTED objects must only use the RB_OBJ_WRITE()
+    // macro to update VALUE references, as to trigger write barriers.
+    .flags = RUBY_TYPED_FREE_IMMEDIATELY | RUBY_TYPED_WB_PROTECTED | FFI_RUBY_TYPED_FROZEN_SHAREABLE
+};
 
 static VALUE LibraryClass = Qnil, SymbolClass = Qnil;
 
@@ -80,7 +108,7 @@ static VALUE
 library_allocate(VALUE klass)
 {
     Library* library;
-    return Data_Make_Struct(klass, Library, NULL, library_free, library);
+    return TypedData_Make_Struct(klass, Library, &rbffi_library_data_type, library);
 }
 
 /*
@@ -100,7 +128,7 @@ library_open(VALUE klass, VALUE libname, VALUE libflags)
 /*
  * call-seq: initialize(libname, libflags)
  * @param [String] libname name of library to open
- * @param [Fixnum] libflags flags for library to open
+ * @param [Integer] libflags flags for library to open
  * @return [FFI::DynamicLibrary]
  * @raise {LoadError} if +libname+ cannot be opened
  * A new DynamicLibrary instance.
@@ -113,9 +141,9 @@ library_initialize(VALUE self, VALUE libname, VALUE libflags)
 
     Check_Type(libflags, T_FIXNUM);
 
-    Data_Get_Struct(self, Library, library);
+    TypedData_Get_Struct(self, Library, &rbffi_library_data_type, library);
     flags = libflags != Qnil ? NUM2UINT(libflags) : 0;
-    
+
     library->handle = dl_open(libname != Qnil ? StringValueCStr(libname) : NULL, flags);
     if (library->handle == NULL) {
         char errmsg[1024];
@@ -133,7 +161,9 @@ library_initialize(VALUE self, VALUE libname, VALUE libflags)
         library->handle = RTLD_DEFAULT;
     }
 #endif
-    rb_iv_set(self, "@name", libname != Qnil ? libname : rb_str_new2("[current process]"));
+    rb_iv_set(self, "@name", libname != Qnil ? rb_str_new_frozen(libname) : rb_str_new2("[current process]"));
+
+    rb_obj_freeze(self);
     return self;
 }
 
@@ -144,9 +174,9 @@ library_dlsym(VALUE self, VALUE name)
     void* address = NULL;
     Check_Type(name, T_STRING);
 
-    Data_Get_Struct(self, Library, library);
+    TypedData_Get_Struct(self, Library, &rbffi_library_data_type, library);
     address = dl_sym(library->handle, StringValueCStr(name));
-    
+
     return address != NULL ? symbol_new(self, address, name) : Qnil;
 }
 
@@ -163,8 +193,10 @@ library_dlerror(VALUE self)
 }
 
 static void
-library_free(Library* library)
+library_free(void *data)
 {
+    Library *library = (Library*)data;
+
     /* dlclose() on MacOS tends to segfault - avoid it */
 #ifndef __APPLE__
     if (library->handle != NULL) {
@@ -172,6 +204,12 @@ library_free(Library* library)
     }
 #endif
     xfree(library);
+}
+
+static size_t
+library_memsize(const void *data)
+{
+    return sizeof(Library);
 }
 
 #if (defined(_WIN32) || defined(__WIN32__)) && !defined(__CYGWIN__)
@@ -189,8 +227,19 @@ dl_open(const char* name, int flags)
 static void
 dl_error(char* buf, int size)
 {
-    FormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM, NULL, GetLastError(),
-            0, buf, size, NULL);
+    // Get the last error code
+    DWORD error = GetLastError();
+
+    // Get the associated message
+    LPSTR message = NULL;
+    FormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_ALLOCATE_BUFFER,
+                   NULL, error, 0, (LPSTR)&message, 0, NULL);
+
+    // Update the passed in buffer
+    snprintf(buf, size, "Failed with error %d: %s", error, message);
+
+    // Free the allocated message
+    LocalFree(message);
 }
 #endif
 
@@ -198,10 +247,9 @@ static VALUE
 symbol_allocate(VALUE klass)
 {
     LibrarySymbol* sym;
-    VALUE obj = Data_Make_Struct(klass, LibrarySymbol, NULL, -1, sym);
-    sym->name = Qnil;
-    sym->library = Qnil;
-    sym->base.rbParent = Qnil;
+    VALUE obj = TypedData_Make_Struct(klass, LibrarySymbol, &library_symbol_data_type, sym);
+    RB_OBJ_WRITE(obj, &sym->base.rbParent, Qnil);
+    RB_OBJ_WRITE(obj, &sym->name, Qnil);
 
     return obj;
 }
@@ -224,23 +272,39 @@ static VALUE
 symbol_new(VALUE library, void* address, VALUE name)
 {
     LibrarySymbol* sym;
-    VALUE obj = Data_Make_Struct(SymbolClass, LibrarySymbol, symbol_mark, -1, sym);
+    VALUE obj = TypedData_Make_Struct(SymbolClass, LibrarySymbol, &library_symbol_data_type, sym);
 
     sym->base.memory.address = address;
     sym->base.memory.size = LONG_MAX;
     sym->base.memory.typeSize = 1;
     sym->base.memory.flags = MEM_RD | MEM_WR;
-    sym->library = library;
-    sym->name = name;
+    RB_OBJ_WRITE(obj, &sym->base.rbParent, library);
+    RB_OBJ_WRITE(obj, &sym->name, rb_str_new_frozen(name));
 
+    rb_obj_freeze(obj);
     return obj;
 }
 
 static void
-symbol_mark(LibrarySymbol* sym)
+symbol_mark(void *data)
 {
-    rb_gc_mark(sym->library);
-    rb_gc_mark(sym->name);
+    LibrarySymbol *sym = (LibrarySymbol *)data;
+    rb_gc_mark_movable(sym->base.rbParent);
+    rb_gc_mark_movable(sym->name);
+}
+
+static void
+symbol_compact(void *data)
+{
+    LibrarySymbol *sym = (LibrarySymbol *)data;
+    ffi_gc_location(sym->base.rbParent);
+    ffi_gc_location(sym->name);
+}
+
+static size_t
+symbol_memsize(const void *data)
+{
+    return sizeof(LibrarySymbol);
 }
 
 /*
@@ -254,8 +318,8 @@ symbol_inspect(VALUE self)
     LibrarySymbol* sym;
     char buf[256];
 
-    Data_Get_Struct(self, LibrarySymbol, sym);
-    snprintf(buf, sizeof(buf), "#<FFI::Library::Symbol name=%s address=%p>",
+    TypedData_Get_Struct(self, LibrarySymbol, &library_symbol_data_type, sym);
+    snprintf(buf, sizeof(buf), "#<FFI::DynamicLibrary::Symbol name=%s address=%p>",
              StringValueCStr(sym->name), sym->base.memory.address);
     return rb_str_new2(buf);
 }
@@ -331,4 +395,3 @@ rbffi_DynamicLibrary_Init(VALUE moduleFFI)
 #undef DEF
 
 }
-
