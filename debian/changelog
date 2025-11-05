@@ -1,3 +1,11 @@
+ruby-ffi (1.17.2+dfsg-1) unstable; urgency=medium
+
+  * Team upload.
+  * New upstream release.
+  * Update Standards-Version to 4.7.2, no changes needed.
+
+ -- Simon Quigley <tsimonq2@debian.org>  Thu, 30 Oct 2025 10:16:37 -0500
+
 ruby-ffi (1.17.0+dfsg-1) unstable; urgency=medium
 
   * Team upload
